@@ -2,7 +2,7 @@ from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, END
 import anthropic
 import openai
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, OPENAI_API_KEY, OPENAI_MODEL
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_API_KEY, GROQ_MODEL
 
 class OrgState(TypedDict):
     ceo_request: str
@@ -51,9 +51,12 @@ def validate_output(state: OrgState) -> OrgState:
         }
         state["analyst_decision"] = "REJECTED"
         return state
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    client = openai.OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1"
+    )
     client.chat.completions.create(
-        model=OPENAI_MODEL,
+        model=GROQ_MODEL,
         messages=[
             {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
             {"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}
