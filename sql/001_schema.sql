@@ -1,3 +1,21 @@
+-- Drop existing tables in reverse dependency order
+DROP TABLE IF EXISTS capability_bindings CASCADE;
+DROP TABLE IF EXISTS agents CASCADE;
+DROP TABLE IF EXISTS capabilities CASCADE;
+DROP TABLE IF EXISTS evidence_versions CASCADE;
+DROP TABLE IF EXISTS evidence CASCADE;
+DROP TABLE IF EXISTS exception_reports CASCADE;
+DROP TABLE IF EXISTS decisions CASCADE;
+DROP TABLE IF EXISTS audit_log CASCADE;
+DROP TABLE IF EXISTS events CASCADE;
+DROP TABLE IF EXISTS acp_messages CASCADE;
+DROP TABLE IF EXISTS pending_ceo CASCADE;
+DROP TABLE IF EXISTS work_packages CASCADE;
+DROP TABLE IF EXISTS executive_requests CASCADE;
+DROP TABLE IF EXISTS project_states CASCADE;
+DROP TABLE IF EXISTS identifier_counters CASCADE;
+DROP FUNCTION IF EXISTS generate_identifier(TEXT);
+
 -- Identifier counters
 CREATE TABLE IF NOT EXISTS identifier_counters (
     prefix TEXT PRIMARY KEY,
