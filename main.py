@@ -1,10 +1,29 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fastapi import FastAPI
+from supabase import create_client
+from config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CLAUDE_MODEL, GROQ_MODEL
 from core.langgraph_app import workflow_app
 
 logger = logging.getLogger(__name__)
+
+_last_cycle: dict | None = None
+
+
+def check_supabase() -> str:
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        client.table("identifier_counters").select("prefix").limit(1).execute()
+        return "online"
+    except Exception as e:
+        logger.warning(f"Supabase check failed: {e}")
+        return "offline"
+
+
+def get_last_cycle() -> dict | None:
+    return _last_cycle
 
 
 async def keepalive_loop():
@@ -37,8 +56,24 @@ def health():
     return {"status": "ok", "organization": "Organisation AI MVP"}
 
 
+@app.get("/status")
+def status():
+    return {
+        "organization": "Organisation AI MVP",
+        "phase": "IMPLEMENTING",
+        "backend": "online",
+        "supabase": check_supabase(),
+        "last_cycle": get_last_cycle(),
+        "agents": {
+            "chief_architect": CLAUDE_MODEL,
+            "chief_analyst": GROQ_MODEL,
+        }
+    }
+
+
 @app.post("/cycle")
 def run_cycle(request: dict):
+    global _last_cycle
     result = workflow_app.invoke({
         "ceo_request": request.get("message", ""),
         "intent": None,
@@ -49,6 +84,11 @@ def run_cycle(request: dict):
         "deviation": None,
         "final_response": None
     })
+    _last_cycle = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "intent": result["intent"],
+        "analyst_decision": result["analyst_decision"],
+    }
     return {
         "intent": result["intent"],
         "analyst_decision": result["analyst_decision"],

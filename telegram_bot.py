@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BACKEND_URL = "https://organisation-ai.onrender.com/cycle"
+BACKEND_URL = "https://organisation-ai.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
 
 
@@ -36,9 +36,46 @@ def run_health_server():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bonjour ! Je suis l'interface exécutive d'Organisation AI.\n"
+        "Bonjour ! Je suis l'interface exécutive d'Organisation AI.\n\n"
+        "Commandes disponibles :\n"
+        "/status — État du système\n\n"
         "Envoyez votre demande et le Chief Architect vous répondra."
     )
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{BACKEND_URL}/status")
+            response.raise_for_status()
+            s = response.json()
+
+        last = s.get("last_cycle")
+        if last:
+            last_cycle_str = (
+                f"  • Timestamp : `{last['timestamp']}`\n"
+                f"  • Intent : `{last['intent']}`\n"
+                f"  • Décision : `{last['analyst_decision']}`"
+            )
+        else:
+            last_cycle_str = "  • Aucun cycle exécuté"
+
+        reply = (
+            f"*Organisation AI — Statut*\n\n"
+            f"🏢 Organisation : `{s['organization']}`\n"
+            f"📋 Phase : `{s['phase']}`\n"
+            f"⚙️ Backend : `{s['backend']}`\n"
+            f"🗄️ Supabase : `{s['supabase']}`\n\n"
+            f"🤖 *Agents actifs*\n"
+            f"  • Chief Architect : `{s['agents']['chief_architect']}`\n"
+            f"  • Chief Analyst : `{s['agents']['chief_analyst']}`\n\n"
+            f"🔄 *Dernier cycle*\n{last_cycle_str}"
+        )
+        await update.message.reply_text(reply, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Erreur /status: {e}")
+        await update.message.reply_text(f"❌ Impossible de récupérer le statut : {e}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -50,7 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(BACKEND_URL, json={"message": message})
+            response = await client.post(f"{BACKEND_URL}/cycle", json={"message": message})
             response.raise_for_status()
             result = response.json()
             logger.info(f"Backend répondu: intent={result.get('intent')}, decision={result.get('analyst_decision')}")
@@ -76,6 +113,7 @@ if __name__ == "__main__":
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
