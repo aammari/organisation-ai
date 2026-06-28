@@ -1,8 +1,17 @@
 from typing import TypedDict, Optional
+from pathlib import Path
 from langgraph.graph import StateGraph, END
 import anthropic
 import openai
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_API_KEY, GROQ_MODEL
+
+
+def load_kernel() -> str:
+    kernel_path = Path(__file__).parent.parent / "docs" / "kernel"
+    docs = []
+    for f in sorted(kernel_path.glob("*.md")):
+        docs.append(f.read_text())
+    return "\n\n---\n\n".join(docs)
 
 class OrgState(TypedDict):
     ceo_request: str
@@ -34,10 +43,11 @@ def qualify_intent(state: OrgState) -> OrgState:
 
 def call_architect(state: OrgState) -> OrgState:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    system = ARCHITECT_SYSTEM_PROMPT + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=4096,
-        system=ARCHITECT_SYSTEM_PROMPT,
+        system=system,
         messages=[{"role": "user", "content": state["ceo_request"]}]
     )
     state["architect_output"] = message.content[0].text
@@ -55,10 +65,11 @@ def validate_output(state: OrgState) -> OrgState:
         api_key=GROQ_API_KEY,
         base_url="https://api.groq.com/openai/v1"
     )
+    analyst_system = ANALYST_SYSTEM_PROMPT + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
     client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
+            {"role": "system", "content": analyst_system},
             {"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}
         ]
     )
