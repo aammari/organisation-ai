@@ -1,0 +1,44 @@
+site_name: Organisation AI
+site_description: Documentation officielle de l'Organisation AI
+site_author: Abdelaziz Ammari
+repo_url: https://github.com/aammari/organisation-ai
+repo_name: organisation-ai
+
+theme:
+  name: material
+  language: fr
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - tables
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Accueil: index.md
+  - Gouvernance:
+    - governance/index.md
+  - Architecture:
+    - architecture/index.md
+  - Design Technique:
+    - technical-design/index.md
+  - Opérations:
+    - operations/index.md
