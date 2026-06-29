@@ -1,12 +1,34 @@
-name: Deploy to Render
+name: CI — Organisation AI
+
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
 jobs:
-  deploy:
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy to Render
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint with ruff
+        run: ruff check . --select E,F --ignore E501
+
+      - name: Check backend health (prod)
         run: |
-          curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://organisation-ai.onrender.com/health)
+          echo "Health check status: $STATUS"
+          [ "$STATUS" = "200" ] && echo "✅ Backend OK" || echo "⚠️ Backend unreachable (may be sleeping)"
+
+  # CD is handled automatically by Render on every push to main
+  # (autoDeploy: yes, trigger: commit) — no deploy hook needed
