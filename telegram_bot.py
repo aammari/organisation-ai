@@ -65,6 +65,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         budget_pct = cost.get("budget_pct", 0)
         budget_icon = "🟢" if budget_pct < 80 else "🟡" if budget_pct < 100 else "🔴"
 
+        no_cycle = "  Aucun cycle aujourd'hui"
         msg = (
             f"🏢 *Organisation AI*\n"
             f"Phase : `{data.get('phase', '—')}`  |  "
@@ -74,7 +75,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"  Ce mois : `${cost.get('month_usd', 0):.4f}`\n"
             f"  Budget  : {budget_icon} `{budget_pct:.1f}%` / $5.00\n\n"
             f"🤖 *Par agent*\n"
-            f"{agent_lines or '  Aucun cycle aujourd\\'hui'}\n"
+            f"{agent_lines or no_cycle}\n"
             f"📊 Cycles total : `{data.get('cycles_total', 0)}`"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
