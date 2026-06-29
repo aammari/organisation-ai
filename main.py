@@ -303,7 +303,8 @@ async def thread_start(body: ThreadStartIn):
 
     for turn in range(1, 4):
         # Chief Architect produces ACP
-        arch_resp = architect_client.messages.create(
+        arch_resp = await asyncio.to_thread(
+            architect_client.messages.create,
             model=CLAUDE_MODEL,
             max_tokens=2048,
             system=(
@@ -334,22 +335,42 @@ async def thread_start(body: ThreadStartIn):
         history.append({"role": "assistant", "content": acp})
 
         # Chief Analyst validates or objects
-        analyst_resp = analyst_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
-                        "OBJECTION suivi de tes remarques sinon. Sois bref."
-                    ),
-                },
-                {"role": "user", "content": acp},
-            ],
-        )
-        verdict = analyst_resp.choices[0].message.content
+        try:
+            analyst_resp = await asyncio.to_thread(
+                analyst_client.chat.completions.create,
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
+                            "OBJECTION suivi de tes remarques sinon. Sois bref."
+                        ),
+                    },
+                    {"role": "user", "content": acp},
+                ],
+            )
+            verdict = analyst_resp.choices[0].message.content
+            verdict_status = "VALIDATED" if verdict.strip().upper().startswith("VALIDATED") else "OBJECTION"
+        except Exception as groq_err:
+            err_str = str(groq_err)
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                verdict = "GROQ_RATE_LIMITED — quota TPD epuise. Thread escalade automatiquement."
+            else:
+                verdict = f"ANALYST_UNAVAILABLE — {err_str[:200]}"
+            verdict_status = "ESCALATED"
+            db.table("agent_messages").insert({
+                "id": f"{thread_id}-T{turn}-ANAL",
+                "thread_id": thread_id,
+                "sender": "chief-analyst",
+                "content": verdict,
+                "status": verdict_status,
+                "turn": turn,
+            }).execute()
+            await _tg(f"Tour {turn}/3 — Chief Analyst indisponible\n{verdict}")
+            break
+
         verdict_id = f"{thread_id}-T{turn}-ANAL"
-        verdict_status = "VALIDATED" if verdict.strip().upper().startswith("VALIDATED") else "OBJECTION"
         db.table("agent_messages").insert({
             "id": verdict_id,
             "thread_id": thread_id,
