@@ -108,8 +108,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = response.json()
             logger.info(f"Backend répondu: intent={result.get('intent')}, decision={result.get('analyst_decision')}")
 
-        reply = f"*Chief Architect*\n\n{result.get('response', 'Aucune réponse.')}"
-        await update.message.reply_text(reply, parse_mode='Markdown')
+        reply = f"Chief Architect\n\n{result.get('response', 'Aucune réponse.')}"
+        await update.message.reply_text(reply, parse_mode=None)
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Erreur backend HTTP {e.response.status_code}: {e.response.text}")
