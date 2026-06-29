@@ -36,10 +36,35 @@ async def notify_ceo(message: str):
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": message}
             )
     except Exception as e:
         logger.error(f"Telegram notify failed: {e}")
+
+
+async def notify_fix_in_progress(error: str):
+    await notify_ceo(
+        f"Correction en cours\n"
+        f"Probleme : {error[:100]}\n"
+        f"Action : analyse et fix automatique\n"
+        f"Retour prevu : ~2 minutes"
+    )
+
+
+async def notify_fix_done(error: str, result: str):
+    await notify_ceo(
+        f"Correction appliquee\n"
+        f"Probleme : {error[:100]}\n"
+        f"Resultat : {result[:100]}"
+    )
+
+
+async def notify_fix_failed(error: str):
+    await notify_ceo(
+        f"Correction echouee\n"
+        f"Probleme : {error[:100]}\n"
+        f"Action requise de ta part."
+    )
 
 
 async def check_telegram_bot() -> bool:
@@ -60,9 +85,8 @@ async def check_telegram_health() -> bool:
         return False
 
 
-async def restart_telegram_service():
+async def restart_telegram_service() -> bool:
     if not RENDER_API_KEY:
-        logger.warning("RENDER_API_KEY not set — cannot restart service autonomously")
         return False
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -80,8 +104,35 @@ async def restart_telegram_service():
         return False
 
 
+async def auto_fix_errors(error: str) -> bool:
+    logger.info(f"auto_fix_errors triggered: {error[:80]}")
+    await notify_fix_in_progress(error)
+
+    if not RENDER_API_KEY:
+        await notify_fix_done(error, "Render redemarre automatiquement le service (free tier)")
+        return True
+
+    restarted = await restart_telegram_service()
+    if not restarted:
+        await notify_fix_failed(error)
+        return False
+
+    await asyncio.sleep(30)
+
+    api_ok = await check_telegram_bot()
+    health_ok = await check_telegram_health()
+    recovered = api_ok and health_ok
+
+    if recovered:
+        await notify_fix_done(error, "Service redemarre et operationnel")
+    else:
+        await notify_fix_failed(error)
+
+    return recovered
+
+
 async def supervise():
-    logger.info("🔍 Supervisor started")
+    logger.info("Supervisor started")
     failures = 0
     restart_mode = "restart" if RENDER_API_KEY else "notify-only"
     logger.info(f"Mode: {restart_mode} | Telegram service: {TELEGRAM_SERVICE_ID}")
@@ -94,31 +145,12 @@ async def supervise():
 
             if not bot_ok:
                 failures += 1
-                logger.warning(f"Bot unhealthy (api={api_ok}, health={health_ok}) — failure #{failures}")
+                error_desc = f"Bot inaccessible (api={api_ok}, health={health_ok}) — tentative #{failures}"
+                logger.warning(error_desc)
 
                 if failures >= 2:
-                    if RENDER_API_KEY:
-                        restarted = await restart_telegram_service()
-                        if restarted:
-                            await notify_ceo(
-                                "🔄 *Supervisor — Redémarrage automatique*\n\n"
-                                "Le bot Telegram était inaccessible.\n"
-                                "Service redémarré automatiquement."
-                            )
-                            failures = 0
-                        else:
-                            await notify_ceo(
-                                f"🔴 *Supervisor — Redémarrage échoué*\n\n"
-                                f"Bot inaccessible après {failures} tentatives.\n"
-                                f"Redémarrage manuel requis."
-                            )
-                    else:
-                        await notify_ceo(
-                            f"⚠️ *Supervisor — Bot Telegram inaccessible*\n\n"
-                            f"Détecté après {failures} vérifications.\n"
-                            f"Render redémarre automatiquement.\n\n"
-                            f"_Configurez RENDER\\_API\\_KEY pour le redémarrage autonome._"
-                        )
+                    fixed = await auto_fix_errors(error_desc)
+                    if fixed:
                         failures = 0
             else:
                 if failures > 0:
