@@ -17,12 +17,18 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BACKEND_URL = "https://organisation-ai.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
 
+_ceo_chat_id: int | None = None
+
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/chatid" and _ceo_chat_id:
+            body = f'{{"chat_id":{_ceo_chat_id}}}'.encode()
+        else:
+            body = b'{"status":"ok","service":"telegram-bot"}'
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'{"status":"ok","service":"telegram-bot"}')
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass
@@ -86,9 +92,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _ceo_chat_id
     message = update.message.text
     user = update.message.from_user.username or update.message.from_user.first_name
     chat_id = update.message.chat.id
+    _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
     await update.message.reply_text("⏳ Organisation AI traite votre demande...")
