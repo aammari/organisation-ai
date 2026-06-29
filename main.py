@@ -299,6 +299,23 @@ class ThreadStartIn(BaseModel):
     telegram_thread_msg_id: int = 0
 
 
+class ThreadInterveneIn(BaseModel):
+    telegram_thread_msg_id: int
+    text: str
+
+
+@app.post("/thread/intervene")
+async def thread_intervene(body: ThreadInterveneIn):
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    result = db.table("agent_threads") \
+        .update({"ceo_input": body.text}) \
+        .eq("telegram_thread_msg_id", body.telegram_thread_msg_id) \
+        .in_("status", ["OPEN"]) \
+        .execute()
+    updated = len(result.data) if result.data else 0
+    return {"updated": updated}
+
+
 @app.post("/thread/start")
 async def thread_start(body: ThreadStartIn):
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -309,16 +326,54 @@ async def thread_start(body: ThreadStartIn):
         "title": body.title,
         "wp_id": body.wp_id or None,
         "status": "OPEN",
+        "telegram_chat_id": body.telegram_chat_id or None,
+        "telegram_thread_msg_id": body.telegram_thread_msg_id or None,
     }).execute()
 
     await _tg(f"Thread {thread_id} ouvert\n{body.title}")
 
     anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    history = [{"role": "user", "content": body.subject}]
+    subject = body.subject
+    history = [{"role": "user", "content": subject}]
     resolved = False
+    ceo_stopped = False
 
     for turn in range(1, 4):
+        # Check CEO intervention
+        try:
+            row = db.table("agent_threads").select("ceo_input").eq("id", thread_id).single().execute()
+            ceo_input = (row.data or {}).get("ceo_input")
+        except Exception:
+            ceo_input = None
+
+        if ceo_input:
+            ceo_lower = ceo_input.strip().lower()
+            if ceo_lower in ("stop", "stoppe", "arrête", "arrete"):
+                db.table("agent_threads").update({
+                    "status": "CEO_STOPPED", "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", thread_id).execute()
+                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                                "CEO_STOPPED — discussion arrêtée par le CEO.")
+                ceo_stopped = True
+                break
+            elif ceo_lower in ("valide", "validé", "ok", "approved"):
+                db.table("agent_threads").update({
+                    "status": "CEO_VALIDATED", "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", thread_id).execute()
+                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                                "CEO_VALIDATED — discussion validée par le CEO.")
+                resolved = True
+                break
+            else:
+                # Inject CEO context and notify agents
+                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                                f"CEO intervient : {ceo_input}")
+                subject = subject + f"\n\nCEO : {ceo_input}"
+                history.append({"role": "user", "content": f"Instruction CEO : {ceo_input}"})
+                # Clear intervention so it isn't re-applied
+                db.table("agent_threads").update({"ceo_input": None}).eq("id", thread_id).execute()
+
         # Chief Architect produces ACP
         arch_resp = await asyncio.to_thread(
             anthropic_client.messages.create,
@@ -406,14 +461,16 @@ async def thread_start(body: ThreadStartIn):
 
         history.append({"role": "user", "content": f"OBJECTION du Chief Analyst : {verdict}"})
 
-    if not resolved:
+    if not resolved and not ceo_stopped:
         db.table("agent_threads").update({"status": "ESCALATED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
         await _tg(f"Discussion {thread_id} ESCALATED — 3 tours sans consensus. Decision CEO requise.")
         await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
                         "ESCALATED — 3 tours sans consensus. Decision CEO requise.")
 
+    thread_row = db.table("agent_threads").select("status").eq("id", thread_id).single().execute()
+    final_status = (thread_row.data or {}).get("status", "ESCALATED")
     messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
-    return {"thread_id": thread_id, "status": "RESOLVED" if resolved else "ESCALATED", "messages": messages.data}
+    return {"thread_id": thread_id, "status": final_status, "messages": messages.data}
 
 
 @app.get("/thread/{thread_id}")

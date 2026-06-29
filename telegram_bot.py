@@ -141,7 +141,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
-    await update.message.reply_text("⏳ Organisation AI traite votre demande...")
+    # CEO replied to a thread opening message → intervention
+    reply_to = update.message.reply_to_message
+    if reply_to:
+        reply_msg_id = reply_to.message_id
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(
+                    f"{BACKEND_URL}/thread/intervene",
+                    json={"telegram_thread_msg_id": reply_msg_id, "text": message},
+                )
+                data = r.json()
+            if data.get("updated", 0) > 0:
+                await update.message.reply_text("Intervention CEO transmise aux agents.")
+                return
+        except Exception as e:
+            logger.warning(f"intervene lookup: {e}")
+
+    await update.message.reply_text("Traitement en cours...")
 
     route_info = await qualify_intent(message)
     route = route_info.get("route", "cycle")
