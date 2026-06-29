@@ -18,6 +18,7 @@ from config import (
 )
 from core.langgraph_app import workflow_app
 from core.cost_tracker import CostTracker
+from core.backlog_worker import run_backlog_worker
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ async def keepalive_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(keepalive_loop())
+    asyncio.create_task(run_backlog_worker())
     yield
 
 
