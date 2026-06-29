@@ -48,30 +48,28 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(f"{BACKEND_URL}/status")
             response.raise_for_status()
-            s = response.json()
+            data = response.json()
 
-        last = s.get("last_cycle")
+        last = data.get("last_cycle")
         if last:
-            last_cycle_str = (
-                f"  • Timestamp : `{last['timestamp']}`\n"
-                f"  • Intent : `{last['intent']}`\n"
-                f"  • Décision : `{last['analyst_decision']}`"
-            )
+            ts = last.get("created_at") or last.get("timestamp", "—")
+            intent = last.get("qualified_intent") or last.get("intent", "—")
+            last_cycle_str = f"  • `{ts[:19].replace('T', ' ')}` — `{intent}`"
         else:
             last_cycle_str = "  • Aucun cycle exécuté"
 
-        reply = (
-            f"*Organisation AI — Statut*\n\n"
-            f"🏢 Organisation : `{s['organization']}`\n"
-            f"📋 Phase : `{s['phase']}`\n"
-            f"⚙️ Backend : `{s['backend']}`\n"
-            f"🗄️ Supabase : `{s['supabase']}`\n\n"
+        msg = (
+            f"🏢 *Organisation AI*\n\n"
+            f"📋 Phase : `{data['phase']}`\n"
+            f"⚙️ Backend : ✅ `{data['backend']}`\n"
+            f"🗄️ Supabase : `{data['supabase']}`\n"
+            f"🔢 Cycles total : `{data.get('cycles_total', 0)}`\n\n"
             f"🤖 *Agents actifs*\n"
-            f"  • Chief Architect : `{s['agents']['chief_architect']}`\n"
-            f"  • Chief Analyst : `{s['agents']['chief_analyst']}`\n\n"
+            f"  • Chief Architect : `{data['agents']['chief_architect']}`\n"
+            f"  • Chief Analyst : `{data['agents']['chief_analyst']}`\n\n"
             f"🔄 *Dernier cycle*\n{last_cycle_str}"
         )
-        await update.message.reply_text(reply, parse_mode='Markdown')
+        await update.message.reply_text(msg, parse_mode='Markdown')
 
     except Exception as e:
         logger.error(f"Erreur /status: {e}")
@@ -86,7 +84,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Organisation AI traite votre demande...")
 
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(f"{BACKEND_URL}/cycle", json={"message": message})
             response.raise_for_status()
             result = response.json()
