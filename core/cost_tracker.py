@@ -34,7 +34,7 @@ class CostTracker:
             pass
         return cost
 
-    def get_daily_cost(self, day: str) -> float:
+    def get_daily_rows(self, day: str) -> list:
         try:
             rows = (
                 self.db.table("audit_log")
@@ -44,13 +44,24 @@ class CostTracker:
                 .lt("timestamp", f"{day}T23:59:59")
                 .execute()
             )
-            return sum(
-                float(r["new_value"].get("cost_usd", 0))
-                for r in rows.data
-                if r.get("new_value")
-            )
+            return [r["new_value"] for r in rows.data if r.get("new_value")]
         except Exception:
-            return 0.0
+            return []
+
+    def get_daily_cost(self, day: str) -> float:
+        return sum(float(r.get("cost_usd", 0)) for r in self.get_daily_rows(day))
+
+    def get_daily_breakdown(self, day: str) -> dict:
+        breakdown: dict = {}
+        for r in self.get_daily_rows(day):
+            model = r.get("model", "unknown")
+            if model not in breakdown:
+                breakdown[model] = {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "cycles": 0}
+            breakdown[model]["cost_usd"] += float(r.get("cost_usd", 0))
+            breakdown[model]["input_tokens"] += int(r.get("input_tokens", 0))
+            breakdown[model]["output_tokens"] += int(r.get("output_tokens", 0))
+            breakdown[model]["cycles"] += 1
+        return breakdown
 
     def get_monthly_cost(self, month: str) -> float:
         try:

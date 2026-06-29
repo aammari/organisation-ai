@@ -50,24 +50,32 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response.raise_for_status()
             data = response.json()
 
-        last = data.get("last_cycle")
-        if last:
-            ts = last.get("created_at") or last.get("timestamp", "—")
-            intent = last.get("qualified_intent") or last.get("intent", "—")
-            last_cycle_str = f"  • `{ts[:19].replace('T', ' ')}` — `{intent}`"
-        else:
-            last_cycle_str = "  • Aucun cycle exécuté"
+        cost = data.get("cost", {})
+        by_agent = cost.get("by_agent", {})
+
+        agent_lines = ""
+        for model, info in by_agent.items():
+            name = "Chief Architect" if "claude" in model else "Chief Analyst"
+            agent_lines += (
+                f"  • {name} : `${info['cost_usd']:.4f}` "
+                f"({info['cycles']} cycles, "
+                f"{info['input_tokens'] + info['output_tokens']:,} tokens)\n"
+            )
+
+        budget_pct = cost.get("budget_pct", 0)
+        budget_icon = "🟢" if budget_pct < 80 else "🟡" if budget_pct < 100 else "🔴"
 
         msg = (
-            f"🏢 *Organisation AI*\n\n"
-            f"📋 Phase : `{data['phase']}`\n"
-            f"⚙️ Backend : ✅ `{data['backend']}`\n"
-            f"🗄️ Supabase : `{data['supabase']}`\n"
-            f"🔢 Cycles total : `{data.get('cycles_total', 0)}`\n\n"
-            f"🤖 *Agents actifs*\n"
-            f"  • Chief Architect : `{data['agents']['chief_architect']}`\n"
-            f"  • Chief Analyst : `{data['agents']['chief_analyst']}`\n\n"
-            f"🔄 *Dernier cycle*\n{last_cycle_str}"
+            f"🏢 *Organisation AI*\n"
+            f"Phase : `{data.get('phase', '—')}`  |  "
+            f"Backend : ✅  |  Supabase : `{data.get('supabase', '—')}`\n\n"
+            f"💰 *Coûts aujourd'hui*\n"
+            f"  Total   : `${cost.get('today_usd', 0):.4f}`\n"
+            f"  Ce mois : `${cost.get('month_usd', 0):.4f}`\n"
+            f"  Budget  : {budget_icon} `{budget_pct:.1f}%` / $5.00\n\n"
+            f"🤖 *Par agent*\n"
+            f"{agent_lines or '  Aucun cycle aujourd\\'hui'}\n"
+            f"📊 Cycles total : `{data.get('cycles_total', 0)}`"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
 

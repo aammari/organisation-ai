@@ -102,7 +102,8 @@ def status():
         cycles_total = 0
 
     tracker = CostTracker()
-    daily_cost = tracker.get_daily_cost(today)
+    breakdown = tracker.get_daily_breakdown(today)
+    daily_cost = sum(v["cost_usd"] for v in breakdown.values())
     monthly_cost = tracker.get_monthly_cost(month)
 
     budget_pct = (monthly_cost / budget) * 100
@@ -136,6 +137,15 @@ def status():
             "budget_usd": budget,
             "budget_pct": round(budget_pct, 1),
             "status": cost_status,
+            "by_agent": {
+                model: {
+                    "cost_usd": round(data["cost_usd"], 4),
+                    "input_tokens": data["input_tokens"],
+                    "output_tokens": data["output_tokens"],
+                    "cycles": data["cycles"],
+                }
+                for model, data in breakdown.items()
+            },
         },
         "governance": {
             "open_exception_reports": open_er_count,

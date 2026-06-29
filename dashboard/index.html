@@ -157,6 +157,11 @@
   </div>
 
   <div class="section">
+    <div class="section-title">Coûts par agent — aujourd'hui</div>
+    <div id="agent-costs">Chargement...</div>
+  </div>
+
+  <div class="section">
     <div class="section-title">Dernier cycle</div>
     <div id="last-cycle" style="font-size:0.85rem;color:#aaa">Chargement...</div>
   </div>
@@ -209,6 +214,23 @@
           d.backend || '—';
         document.getElementById('supabase-status').textContent =
           d.supabase || '—';
+
+        const byAgent = cost.by_agent || {};
+        let agentRows = '';
+        for (const [model, data] of Object.entries(byAgent)) {
+          const name = model.includes('claude')
+            ? '🏗️ Chief Architect'
+            : (model.includes('groq') || model.includes('llama') || model.includes('mixtral'))
+            ? '🔍 Chief Analyst'
+            : '⚙️ ' + model;
+          agentRows += `<div class="row">
+            <span>${name}</span>
+            <span style="color:#666;font-size:0.78rem">${data.cycles} cycles · ${(data.input_tokens + data.output_tokens).toLocaleString()} tokens</span>
+            <span class="ok">$${data.cost_usd.toFixed(4)}</span>
+          </div>`;
+        }
+        document.getElementById('agent-costs').innerHTML =
+          agentRows || '<div style="color:#555;font-size:0.85rem">Aucun cycle aujourd\'hui</div>';
 
         const last = d.last_cycle;
         document.getElementById('last-cycle').innerHTML = last
