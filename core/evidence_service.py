@@ -1,6 +1,7 @@
 from app.database import get_supabase
 from core.identifiers import IdentifierService
-import hashlib, json
+import hashlib
+import json
 
 class EvidenceService:
     def __init__(self):

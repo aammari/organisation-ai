@@ -8,7 +8,7 @@ def verify_secret(x_api_secret: str):
     if x_api_secret != API_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-@app.get("/dashboard")
+@router.get("/dashboard")
 def dashboard(x_api_secret: str = Header(...)):
     verify_secret(x_api_secret)
     db = get_supabase()

@@ -1,4 +1,5 @@
-import hashlib, json
+import hashlib
+import json
 
 def test_checksum_deterministic():
     content = {"key": "value", "number": 42}

@@ -1,4 +1,4 @@
-from core.workflow_engine import WorkflowEngine, PROJECT_TRANSITIONS, WP_TRANSITIONS, WorkflowDeviationError
+from core.workflow_engine import WorkflowEngine, PROJECT_TRANSITIONS, WP_TRANSITIONS
 
 def make_engine():
     engine = WorkflowEngine.__new__(WorkflowEngine)

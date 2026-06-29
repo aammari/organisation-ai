@@ -1,5 +1,4 @@
 from app.database import get_supabase
-from config import MANUAL_IDENTIFIER_ALLOWED
 
 VALID_PREFIXES = ["EVID", "DEC", "WP", "ER", "EVT", "AUD", "PROMPT", "CAP"]
 
