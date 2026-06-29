@@ -121,6 +121,12 @@ async def qualify_intent(message: str) -> dict:
             messages=[{"role": "user", "content": message}],
         )
         raw = resp.content[0].text.strip()
+        # Strip markdown code fences if Haiku wraps the JSON
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
         return json.loads(raw)
     except Exception as e:
         logger.warning(f"qualify_intent failed: {e} — fallback cycle")
