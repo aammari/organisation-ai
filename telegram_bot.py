@@ -1,8 +1,10 @@
+import json
 import logging
 import os
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import anthropic
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 import httpx
@@ -14,8 +16,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 BACKEND_URL = "https://organisation-ai.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
+
+CHIEF_OF_STAFF_PROMPT = """Tu es Chief of Staff. Tu qualifies l'intention du CEO et routes vers le bon agent.
+
+Analyse le message et retourne UNIQUEMENT un JSON valide, sans markdown, sans explication :
+
+Si l'intention est DISCUSSION ou VALIDATION (débat inter-agents requis) :
+{"route": "thread", "subject": "<sujet précis extrait du message>"}
+
+Pour tout autre intention (ANALYSE, PRODUCTION, ACTION, question, demande d'info) :
+{"route": "cycle"}
+
+Règle : préfère "cycle" en cas de doute. "thread" uniquement si un débat structuré entre agents est explicitement utile."""
 
 _ceo_chat_id: int | None = None
 
@@ -96,46 +111,59 @@ async def send_long_message(update: Update, text: str):
         await update.message.reply_text(text[i:i + 4000], parse_mode=None)
 
 
+async def qualify_intent(message: str) -> dict:
+    try:
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=128,
+            system=CHIEF_OF_STAFF_PROMPT,
+            messages=[{"role": "user", "content": message}],
+        )
+        raw = resp.content[0].text.strip()
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"qualify_intent failed: {e} — fallback cycle")
+        return {"route": "cycle"}
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
     message = update.message.text
-    message_lower = message.lower()
     user = update.message.from_user.username or update.message.from_user.first_name
     chat_id = update.message.chat.id
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
-    if "thread" in message_lower or "discussion" in message_lower:
-        await update.message.reply_text("⏳ Lancement de la discussion inter-agents...")
+    await update.message.reply_text("⏳ Organisation AI traite votre demande...")
+
+    route_info = await qualify_intent(message)
+    route = route_info.get("route", "cycle")
+    logger.info(f"Chief of Staff route: {route}")
+
+    if route == "thread":
+        subject = route_info.get("subject", message)
         try:
-            async with httpx.AsyncClient(timeout=120) as c:
+            async with httpx.AsyncClient(timeout=180) as c:
                 r = await c.post(
                     f"{BACKEND_URL}/thread/start",
-                    json={
-                        "title": "Discussion agents",
-                        "wp_id": "WP-Sprint2-001",
-                        "subject": message,
-                    },
+                    json={"title": subject[:80], "wp_id": "", "subject": subject},
                 )
                 r.raise_for_status()
                 result = r.json()
 
             discussion = ""
             for msg in result.get("messages", []):
-                sender = msg.get("sender", "")
-                content = msg.get("content", "")[:500]
-                discussion += f"\n\n{sender}:\n{content}"
+                discussion += f"\n\n{msg.get('sender')} :\n{msg.get('content','')[:500]}"
 
             await send_long_message(
                 update,
-                f"Discussion {result.get('thread_id')} — {result.get('status')}\n{discussion}",
+                f"Discussion {result.get('thread_id')} — {result.get('status')}{discussion}",
             )
         except Exception as e:
             logger.error(f"Erreur thread: {type(e).__name__}: {e}")
             await update.message.reply_text(f"Erreur discussion: {e}")
         return
-
-    await update.message.reply_text("⏳ Organisation AI traite votre demande...")
 
     try:
         async with httpx.AsyncClient(timeout=120) as client:
