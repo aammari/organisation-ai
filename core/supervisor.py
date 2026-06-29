@@ -142,9 +142,12 @@ async def supervise():
         counter += 1
         if counter % 5 == 0:
             try:
-                from core.context_sync import OrgContextSync
-                await OrgContextSync().refresh()
-                logger.info("Org context refreshed")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    r = await client.post("https://organisation-ai.onrender.com/context/refresh")
+                    if r.status_code == 200:
+                        logger.info("Org context refreshed")
+                    else:
+                        logger.warning(f"Context refresh returned {r.status_code}")
             except Exception as e:
                 logger.warning(f"Context refresh failed: {e}")
 
