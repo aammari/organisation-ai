@@ -31,6 +31,17 @@ def run_health_server():
     server.serve_forever()
 
 
+async def keep_alive():
+    async with httpx.AsyncClient() as c:
+        try:
+            await c.get(
+                "https://organisation-ai-telegram.onrender.com/health",
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+
 async def notify_ceo(message: str):
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -140,6 +151,9 @@ async def supervise():
 
     while True:
         counter += 1
+        if counter % 10 == 0:
+            await keep_alive()
+
         if counter % 5 == 0:
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
