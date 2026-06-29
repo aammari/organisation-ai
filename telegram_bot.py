@@ -88,7 +88,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     user = update.message.from_user.username or update.message.from_user.first_name
-    logger.info(f"Message reçu de {user}: {message[:80]}")
+    chat_id = update.message.chat.id
+    logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
     await update.message.reply_text("⏳ Organisation AI traite votre demande...")
 

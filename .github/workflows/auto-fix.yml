@@ -1,0 +1,181 @@
+name: Auto-fix CI failures
+
+on:
+  workflow_run:
+    workflows: ["CI — Organisation AI"]
+    types: [completed]
+
+jobs:
+  auto-fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── ATTEMPT 1 : ruff auto-fix ─────────────────────────────────────────
+      - name: Attempt 1 — ruff --fix
+        id: ruff_fix
+        run: |
+          ruff check . --select E,F --ignore E501 --fix || true
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT \
+                           || echo "changed=true"  >> $GITHUB_OUTPUT
+
+      - name: Commit ruff auto-fix
+        if: steps.ruff_fix.outputs.changed == 'true'
+        run: |
+          git config user.email "claude-autofix@organisation-ai"
+          git config user.name "Claude Auto-fix"
+          git add -A
+          git commit -m "auto-fix(attempt-1): ruff lint corrections"
+          git push origin HEAD:main
+
+      # ── Check remaining lint errors ────────────────────────────────────────
+      - name: Re-check lint
+        id: recheck
+        run: |
+          ruff check . --select E,F --ignore E501 --output-format json \
+            > ruff_errors.json 2>/dev/null || true
+          COUNT=$(python3 -c "import json,sys; d=json.load(open('ruff_errors.json')); print(len(d))" 2>/dev/null || echo "0")
+          echo "error_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "Remaining errors: $COUNT"
+
+      # ── ATTEMPT 2 : Claude API fix ────────────────────────────────────────
+      - name: Build Claude payload
+        if: steps.recheck.outputs.error_count != '0'
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+
+          with open('ruff_errors.json') as f:
+              errors = json.load(f)
+
+          # Gather unique files with errors
+          files_with_errors = list(dict.fromkeys(e['filename'] for e in errors))
+
+          source_context = ""
+          for fpath in files_with_errors[:6]:
+              try:
+                  with open(fpath) as fp:
+                      content = fp.read()
+                  source_context += f"\n\n=== {fpath} ===\n{content}"
+              except Exception:
+                  pass
+
+          error_summary = "\n".join(
+              f"  {e['filename']}:{e['location']['row']} [{e['code']}] {e['message']}"
+              for e in errors[:40]
+          )
+
+          prompt = (
+              f"Corrige ces erreurs de lint ruff dans ce projet Python.\n\n"
+              f"ERREURS:\n{error_summary}\n"
+              f"{source_context}\n\n"
+              f"Réponds UNIQUEMENT avec un bloc ```bash contenant les commandes "
+              f"sed ou python -c pour corriger les fichiers. Aucun texte avant ou après."
+          )
+
+          payload = {
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 2048,
+              "system": (
+                  "Tu es un agent de correction autonome pour un projet Python. "
+                  "Tu produis uniquement un script bash avec des commandes sed/python "
+                  "pour corriger les erreurs de lint. Aucune explication."
+              ),
+              "messages": [{"role": "user", "content": prompt}]
+          }
+
+          with open('claude_payload.json', 'w') as f:
+              json.dump(payload, f)
+
+          print("Payload ready — errors:", len(errors), "files:", len(files_with_errors))
+          PYEOF
+
+      - name: Attempt 2 — Claude API fix
+        if: steps.recheck.outputs.error_count != '0'
+        id: claude_fix
+        run: |
+          curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            -d @claude_payload.json > claude_response.json
+
+          python3 << 'PYEOF'
+          import json, re, sys
+
+          with open('claude_response.json') as f:
+              data = json.load(f)
+
+          text = data.get('content', [{}])[0].get('text', '')
+          match = re.search(r'```bash\n(.*?)```', text, re.DOTALL)
+          if not match:
+              print("No bash block found. Claude response:", text[:400])
+              sys.exit(1)
+
+          script = match.group(1)
+          with open('claude_fix.sh', 'w') as f:
+              f.write(script)
+          print("Script extracted OK")
+          PYEOF
+
+          bash claude_fix.sh || echo "Script failed — continuing"
+
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT \
+                           || echo "changed=true"  >> $GITHUB_OUTPUT
+
+      - name: Commit Claude fix
+        if: steps.claude_fix.outputs.changed == 'true'
+        run: |
+          git config user.email "claude-autofix@organisation-ai"
+          git config user.name "Claude Auto-fix"
+          git add -A
+          git commit -m "auto-fix(attempt-2): Claude API lint correction"
+          git push origin HEAD:main
+
+      # ── Final check ───────────────────────────────────────────────────────
+      - name: Final lint check
+        id: final
+        run: |
+          ruff check . --select E,F --ignore E501 > final_errors.txt 2>&1 \
+            && echo "ok=true" >> $GITHUB_OUTPUT \
+            || echo "ok=false" >> $GITHUB_OUTPUT
+
+      # ── CEO notification if both attempts failed ───────────────────────────
+      - name: Notify CEO via Telegram
+        if: steps.final.outputs.ok == 'false'
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}"
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          ERRORS=$(head -20 final_errors.txt | sed "s/'/\`/g")
+          TEXT=$(printf '🚨 *Auto-fix échoué — 2 tentatives infructueuses*\n\nCommit : `%s`\n\nErreurs :\n```\n%s\n```\n\n🔗 %s\n\n*Intervention CEO requise.*' \
+            "${COMMIT:0:8}" "$ERRORS" "$RUN_URL")
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            -d "parse_mode=Markdown" \
+            -d "disable_web_page_preview=true"
+
+      - name: Fail job if not fixed
+        if: steps.final.outputs.ok == 'false'
+        run: |
+          echo "❌ Lint non corrigé après 2 tentatives automatiques. CEO notifié."
+          exit 1
