@@ -134,10 +134,20 @@ async def auto_fix_errors(error: str) -> bool:
 async def supervise():
     logger.info("Supervisor started")
     failures = 0
+    counter = 0
     restart_mode = "restart" if RENDER_API_KEY else "notify-only"
     logger.info(f"Mode: {restart_mode} | Telegram service: {TELEGRAM_SERVICE_ID}")
 
     while True:
+        counter += 1
+        if counter % 5 == 0:
+            try:
+                from core.context_sync import OrgContextSync
+                await OrgContextSync().refresh()
+                logger.info("Org context refreshed")
+            except Exception as e:
+                logger.warning(f"Context refresh failed: {e}")
+
         try:
             api_ok = await check_telegram_bot()
             health_ok = await check_telegram_health()
