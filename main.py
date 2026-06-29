@@ -3,10 +3,12 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timezone
 
 import anthropic
+import httpx
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
@@ -251,6 +253,137 @@ async def backlog_add(
     }
     db.table("backlog_items").upsert(row).execute()
     return {"status": "created", "id": item.id}
+
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+
+async def _tg(text: str):
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            )
+    except Exception:
+        pass
+
+
+class ThreadStartIn(BaseModel):
+    title: str
+    wp_id: str = ""
+    subject: str
+
+
+@app.post("/thread/start")
+async def thread_start(body: ThreadStartIn):
+    import openai as _openai
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+    thread_id = f"THR-{uuid.uuid4().hex[:8].upper()}"
+    db.table("agent_threads").insert({
+        "id": thread_id,
+        "title": body.title,
+        "wp_id": body.wp_id or None,
+        "status": "OPEN",
+    }).execute()
+
+    await _tg(f"Thread {thread_id} ouvert\n{body.title}")
+
+    architect_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    analyst_client = _openai.OpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    history = [{"role": "user", "content": body.subject}]
+    resolved = False
+
+    for turn in range(1, 4):
+        # Chief Architect produces ACP
+        arch_resp = architect_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=2048,
+            system=(
+                "Tu es Chief Architect. Produis un ACP (Architect Contribution Proposal) "
+                "clair et structuré sur le sujet donné. Sois concis."
+            ),
+            messages=history,
+        )
+        try:
+            CostTracker().log_cycle(
+                input_tokens=arch_resp.usage.input_tokens,
+                output_tokens=arch_resp.usage.output_tokens,
+                model=CLAUDE_MODEL,
+            )
+        except Exception:
+            pass
+        acp = arch_resp.content[0].text
+        msg_id = f"{thread_id}-T{turn}-ARCH"
+        db.table("agent_messages").insert({
+            "id": msg_id,
+            "thread_id": thread_id,
+            "sender": "chief-architect",
+            "content": acp,
+            "status": "PENDING",
+            "turn": turn,
+        }).execute()
+        await _tg(f"Tour {turn}/3 — Chief Architect\n{thread_id}\n\n{acp[:300]}...")
+        history.append({"role": "assistant", "content": acp})
+
+        # Chief Analyst validates or objects
+        analyst_resp = analyst_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
+                        "OBJECTION suivi de tes remarques sinon. Sois bref."
+                    ),
+                },
+                {"role": "user", "content": acp},
+            ],
+        )
+        verdict = analyst_resp.choices[0].message.content
+        verdict_id = f"{thread_id}-T{turn}-ANAL"
+        verdict_status = "VALIDATED" if verdict.strip().upper().startswith("VALIDATED") else "OBJECTION"
+        db.table("agent_messages").insert({
+            "id": verdict_id,
+            "thread_id": thread_id,
+            "sender": "chief-analyst",
+            "content": verdict,
+            "status": verdict_status,
+            "turn": turn,
+        }).execute()
+        await _tg(f"Tour {turn}/3 — Chief Analyst\n{verdict_status}\n\n{verdict[:300]}")
+
+        if verdict_status == "VALIDATED":
+            db.table("agent_threads").update({"status": "RESOLVED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
+            await _tg(f"Thread {thread_id} RESOLU au tour {turn}")
+            resolved = True
+            break
+
+        history.append({"role": "user", "content": f"OBJECTION du Chief Analyst : {verdict}"})
+
+    if not resolved:
+        db.table("agent_threads").update({"status": "ESCALATED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
+        await _tg(f"Thread {thread_id} ESCALADE CEO — 3 tours sans consensus.")
+
+    messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
+    return {"thread_id": thread_id, "status": "RESOLVED" if resolved else "ESCALATED", "messages": messages.data}
+
+
+@app.get("/thread/{thread_id}")
+async def thread_get(thread_id: str):
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    thread = db.table("agent_threads").select("*").eq("id", thread_id).single().execute()
+    if not thread.data:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
+    return {"thread": thread.data, "messages": messages.data}
 
 
 @app.get("/context")
