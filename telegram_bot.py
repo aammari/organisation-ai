@@ -150,22 +150,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if route == "thread":
         subject = route_info.get("subject", message)
         try:
-            async with httpx.AsyncClient(timeout=180) as c:
+            opening = await update.message.reply_text("Ouverture de la discussion inter-agents...")
+            thread_msg_id = opening.message_id
+
+            async with httpx.AsyncClient(timeout=300) as c:
                 r = await c.post(
                     f"{BACKEND_URL}/thread/start",
-                    json={"title": subject[:80], "wp_id": "", "subject": subject},
+                    json={
+                        "title": subject[:100],
+                        "wp_id": "WP-Sprint2-001",
+                        "subject": subject,
+                        "telegram_chat_id": update.message.chat_id,
+                        "telegram_thread_msg_id": thread_msg_id,
+                    },
                 )
                 r.raise_for_status()
-                result = r.json()
-
-            discussion = ""
-            for msg in result.get("messages", []):
-                discussion += f"\n\n{msg.get('sender')} :\n{msg.get('content','')[:500]}"
-
-            await send_long_message(
-                update,
-                f"Discussion {result.get('thread_id')} — {result.get('status')}{discussion}",
-            )
         except Exception as e:
             logger.error(f"Erreur thread: {type(e).__name__}: {e}")
             await update.message.reply_text(f"Erreur discussion: {e}")
