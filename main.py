@@ -271,6 +271,14 @@ async def _tg(text: str):
         pass
 
 
+async def notify_turn(turn: int, sender: str, content: str):
+    short = content[:300]
+    await _tg(
+        f"Thread en cours — Tour {turn}\n\n"
+        f"{sender} :\n{short}..."
+    )
+
+
 class ThreadStartIn(BaseModel):
     title: str
     wp_id: str = ""
@@ -331,7 +339,7 @@ async def thread_start(body: ThreadStartIn):
             "status": "PENDING",
             "turn": turn,
         }).execute()
-        await _tg(f"Tour {turn}/3 — Chief Architect\n{thread_id}\n\n{acp[:300]}...")
+        await notify_turn(turn, "Chief Architect", acp)
         history.append({"role": "assistant", "content": acp})
 
         # Chief Analyst validates or objects
@@ -367,7 +375,7 @@ async def thread_start(body: ThreadStartIn):
                 "status": verdict_status,
                 "turn": turn,
             }).execute()
-            await _tg(f"Tour {turn}/3 — Chief Analyst indisponible\n{verdict}")
+            await notify_turn(turn, "Chief Analyst (indisponible)", verdict)
             break
 
         verdict_id = f"{thread_id}-T{turn}-ANAL"
@@ -379,11 +387,11 @@ async def thread_start(body: ThreadStartIn):
             "status": verdict_status,
             "turn": turn,
         }).execute()
-        await _tg(f"Tour {turn}/3 — Chief Analyst\n{verdict_status}\n\n{verdict[:300]}")
+        await notify_turn(turn, f"Chief Analyst [{verdict_status}]", verdict)
 
         if verdict_status == "VALIDATED":
             db.table("agent_threads").update({"status": "RESOLVED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
-            await _tg(f"Thread {thread_id} RESOLU au tour {turn}")
+            await _tg(f"Discussion {thread_id} RESOLVED — consensus atteint au tour {turn}")
             resolved = True
             break
 
@@ -391,7 +399,7 @@ async def thread_start(body: ThreadStartIn):
 
     if not resolved:
         db.table("agent_threads").update({"status": "ESCALATED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
-        await _tg(f"Thread {thread_id} ESCALADE CEO — 3 tours sans consensus.")
+        await _tg(f"Discussion {thread_id} ESCALATED — 3 tours sans consensus. Decision CEO requise.")
 
     messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
     return {"thread_id": thread_id, "status": "RESOLVED" if resolved else "ESCALATED", "messages": messages.data}
