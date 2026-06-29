@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, date, timezone
 
 import anthropic
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from supabase import create_client
@@ -220,6 +221,36 @@ def run_cycle(request: dict):
         "analyst_decision": result["analyst_decision"],
         "response": result["final_response"],
     }
+
+
+class BacklogItemIn(BaseModel):
+    id: str
+    title: str
+    description: str = ""
+    priority: str = "P2"
+    decision_level: str = "D1"
+    assigned_agent: str = ""
+
+
+@app.post("/backlog/add")
+async def backlog_add(
+    item: BacklogItemIn,
+    x_agent_role: str = Header(default=""),
+):
+    if x_agent_role.lower() != "chief-of-staff":
+        raise HTTPException(status_code=403, detail="Reserved for Chief of Staff")
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    row = {
+        "id": item.id,
+        "title": item.title,
+        "description": item.description,
+        "priority": item.priority,
+        "status": "PENDING",
+        "decision_level": item.decision_level,
+        "assigned_agent": item.assigned_agent or None,
+    }
+    db.table("backlog_items").upsert(row).execute()
+    return {"status": "created", "id": item.id}
 
 
 @app.get("/context")
