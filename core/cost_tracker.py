@@ -4,6 +4,8 @@ from app.database import get_supabase
 INPUT_COST_PER_1K = 0.003   # claude-sonnet-4-6
 OUTPUT_COST_PER_1K = 0.015
 
+# Cost entries stored in audit_log (operation='API_COST') — no extra DDL needed
+
 
 class CostTracker:
     def __init__(self):
@@ -15,14 +17,58 @@ class CostTracker:
             + (output_tokens / 1000) * OUTPUT_COST_PER_1K
         )
         try:
-            self.db.table("api_usage").insert({
-                "date": date.today().isoformat(),
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cost_usd": round(cost, 6),
-                "created_at": datetime.now().isoformat(),
+            self.db.table("audit_log").insert({
+                "actor": "CostTracker",
+                "operation": "API_COST",
+                "object_id": model,
+                "new_value": {
+                    "date": date.today().isoformat(),
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost_usd": round(cost, 6),
+                },
+                "metadata": {"timestamp": datetime.now().isoformat()},
             }).execute()
         except Exception:
-            pass  # table may not exist yet — degrade gracefully
+            pass
         return cost
+
+    def get_daily_cost(self, day: str) -> float:
+        try:
+            rows = (
+                self.db.table("audit_log")
+                .select("new_value")
+                .eq("operation", "API_COST")
+                .gte("timestamp", f"{day}T00:00:00")
+                .lt("timestamp", f"{day}T23:59:59")
+                .execute()
+            )
+            return sum(
+                float(r["new_value"].get("cost_usd", 0))
+                for r in rows.data
+                if r.get("new_value")
+            )
+        except Exception:
+            return 0.0
+
+    def get_monthly_cost(self, month: str) -> float:
+        try:
+            year, mon = int(month[:4]), int(month[5:7])
+            next_year, next_mon = (year + 1, 1) if mon == 12 else (year, mon + 1)
+            next_month = f"{next_year:04d}-{next_mon:02d}-01"
+            rows = (
+                self.db.table("audit_log")
+                .select("new_value")
+                .eq("operation", "API_COST")
+                .gte("timestamp", f"{month}-01T00:00:00")
+                .lt("timestamp", f"{next_month}T00:00:00")
+                .execute()
+            )
+            return sum(
+                float(r["new_value"].get("cost_usd", 0))
+                for r in rows.data
+                if r.get("new_value")
+            )
+        except Exception:
+            return 0.0

@@ -17,6 +17,7 @@ from config import (
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
 )
 from core.langgraph_app import workflow_app
+from core.cost_tracker import CostTracker
 
 logger = logging.getLogger(__name__)
 
@@ -100,14 +101,9 @@ def status():
         last_cycle_data = _last_cycle
         cycles_total = 0
 
-    try:
-        today_rows = db.table("api_usage").select("cost_usd").eq("date", today).execute()
-        daily_cost = sum(float(r["cost_usd"]) for r in today_rows.data)
-        month_rows = db.table("api_usage").select("cost_usd").like("date", f"{month}%").execute()
-        monthly_cost = sum(float(r["cost_usd"]) for r in month_rows.data)
-    except Exception:
-        daily_cost = 0.0
-        monthly_cost = 0.0
+    tracker = CostTracker()
+    daily_cost = tracker.get_daily_cost(today)
+    monthly_cost = tracker.get_monthly_cost(month)
 
     budget_pct = (monthly_cost / budget) * 100
     cost_status = "OK" if budget_pct < 80 else "WARNING" if budget_pct < 100 else "CRITICAL"
