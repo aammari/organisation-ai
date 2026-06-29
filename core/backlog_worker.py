@@ -6,13 +6,28 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
-from app.database import get_supabase
-
 logger = logging.getLogger(__name__)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BACKEND = os.getenv("BACKEND_URL", "https://organisation-ai.onrender.com")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 PORT = int(os.getenv("PORT", 8081))
+
+_SB_HEADERS = None
+
+
+def _headers():
+    global _SB_HEADERS
+    if not _SB_HEADERS:
+        _SB_HEADERS = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+    return _SB_HEADERS
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -38,52 +53,56 @@ async def notify(msg: str):
         logger.error(f"Notify failed: {e}")
 
 
+async def fetch_pending() -> list:
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{SUPABASE_URL}/rest/v1/backlog_items",
+            params={"status": "eq.PENDING", "order": "priority.asc", "limit": "1", "select": "*"},
+            headers=_headers(),
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def update_item(item_id: str, patch: dict):
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.patch(
+            f"{SUPABASE_URL}/rest/v1/backlog_items",
+            params={"id": f"eq.{item_id}"},
+            headers=_headers(),
+            json=patch,
+        )
+        r.raise_for_status()
+
+
 async def run():
-    db = get_supabase()
     logger.info("Backlog Worker started")
     while True:
         try:
-            items = (
-                db.table("backlog_items")
-                .select("*")
-                .eq("status", "PENDING")
-                .order("priority")
-                .limit(1)
-                .execute()
-            )
-            if items.data:
-                item = items.data[0]
-                if item["decision_level"] == "D3":
-                    await notify(
-                        f"Décision D3 requise\n{item['title']}"
-                    )
-                    db.table("backlog_items").update(
-                        {"status": "WAITING_CEO"}
-                    ).eq("id", item["id"]).execute()
+            items = await fetch_pending()
+            if items:
+                item = items[0]
+                if item.get("decision_level") == "D3":
+                    await notify(f"Décision D3 requise\n{item['title']}")
+                    await update_item(item["id"], {"status": "WAITING_CEO"})
                 else:
-                    db.table("backlog_items").update(
-                        {"status": "IN_PROGRESS"}
-                    ).eq("id", item["id"]).execute()
+                    await update_item(item["id"], {"status": "IN_PROGRESS"})
                     async with httpx.AsyncClient(timeout=120) as c:
                         r = await c.post(
                             f"{BACKEND}/cycle",
                             json={
                                 "message": (
                                     f"{item['id']}: {item['title']}\n\n"
-                                    f"{item['description']}"
+                                    f"{item.get('description', '')}"
                                 )
                             },
                         )
-                    db.table("backlog_items").update(
-                        {
-                            "status": "DONE",
-                            "result": r.json(),
-                            "updated_at": datetime.now().isoformat(),
-                        }
-                    ).eq("id", item["id"]).execute()
-                    await notify(
-                        f"Backlog {item['id']} traite\n{item['title']}"
-                    )
+                    await update_item(item["id"], {
+                        "status": "DONE",
+                        "result": r.json(),
+                        "updated_at": datetime.now().isoformat(),
+                    })
+                    await notify(f"Backlog {item['id']} traite\n{item['title']}")
             else:
                 await asyncio.sleep(300)
                 continue
