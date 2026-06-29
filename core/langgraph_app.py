@@ -3,9 +3,8 @@ from typing import TypedDict, Optional
 from pathlib import Path
 from langgraph.graph import StateGraph, END
 import anthropic
-import openai
 import httpx
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_API_KEY, GROQ_MODEL
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from core.cost_tracker import CostTracker
 from core.context_sync import OrgContextSync
 
@@ -80,28 +79,33 @@ def call_architect(state: OrgState) -> OrgState:
     return state
 
 
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+
 def validate_output(state: OrgState) -> OrgState:
     if not state.get("architect_output"):
         state["deviation"] = {"severity": "D2", "rule": "MISSING_ARCHITECT_OUTPUT"}
         state["analyst_decision"] = "REJECTED"
         return state
-    client = openai.OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
     analyst_system = ANALYST_SYSTEM_PROMPT + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
     try:
-        client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": analyst_system},
-                {"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}
-            ]
+        haiku = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = haiku.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=512,
+            system=analyst_system,
+            messages=[{"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}],
         )
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "rate_limit" in err.lower():
-            # Groq TPD épuisé — auto-validation dégradée pour ne pas bloquer le CEO
-            state["analyst_decision"] = "VALIDATED_DEGRADED"
-        else:
-            state["analyst_decision"] = "ANALYST_UNAVAILABLE"
+        try:
+            CostTracker().log_cycle(
+                input_tokens=resp.usage.input_tokens,
+                output_tokens=resp.usage.output_tokens,
+                model=HAIKU_MODEL,
+            )
+        except Exception:
+            pass
+    except Exception:
+        state["analyst_decision"] = "ANALYST_UNAVAILABLE"
         state["final_response"] = state["architect_output"]
         return state
     state["analyst_decision"] = "VALIDATED"
