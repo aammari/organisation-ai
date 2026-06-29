@@ -91,13 +91,49 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Impossible de récupérer le statut : {e}")
 
 
+async def send_long_message(update: Update, text: str):
+    for i in range(0, len(text), 4000):
+        await update.message.reply_text(text[i:i + 4000], parse_mode=None)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
     message = update.message.text
+    message_lower = message.lower()
     user = update.message.from_user.username or update.message.from_user.first_name
     chat_id = update.message.chat.id
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
+
+    if "thread" in message_lower or "discussion" in message_lower:
+        await update.message.reply_text("⏳ Lancement de la discussion inter-agents...")
+        try:
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(
+                    f"{BACKEND_URL}/thread/start",
+                    json={
+                        "title": "Discussion agents",
+                        "wp_id": "WP-Sprint2-001",
+                        "subject": message,
+                    },
+                )
+                r.raise_for_status()
+                result = r.json()
+
+            discussion = ""
+            for msg in result.get("messages", []):
+                sender = msg.get("sender", "")
+                content = msg.get("content", "")[:500]
+                discussion += f"\n\n{sender}:\n{content}"
+
+            await send_long_message(
+                update,
+                f"Discussion {result.get('thread_id')} — {result.get('status')}\n{discussion}",
+            )
+        except Exception as e:
+            logger.error(f"Erreur thread: {type(e).__name__}: {e}")
+            await update.message.reply_text(f"Erreur discussion: {e}")
+        return
 
     await update.message.reply_text("⏳ Organisation AI traite votre demande...")
 
