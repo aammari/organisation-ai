@@ -18,7 +18,7 @@ from config import (
 )
 from core.langgraph_app import workflow_app
 from core.cost_tracker import CostTracker
-from core.backlog_worker import run_backlog_worker
+from core.context_sync import OrgContextSync
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,6 @@ async def keepalive_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(keepalive_loop())
-    asyncio.create_task(run_backlog_worker())
     yield
 
 
@@ -221,6 +220,17 @@ def run_cycle(request: dict):
         "analyst_decision": result["analyst_decision"],
         "response": result["final_response"],
     }
+
+
+@app.get("/context")
+async def get_context():
+    return {"context": OrgContextSync().get_formatted()}
+
+
+@app.post("/context/refresh")
+async def refresh_context():
+    ctx = await OrgContextSync().refresh()
+    return {"status": "refreshed", "last_updated": ctx.get("last_updated")}
 
 
 # Dashboard CEO — served at root
