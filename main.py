@@ -278,10 +278,25 @@ async def notify_turn(turn: int, sender: str, content: str):
     )
 
 
+async def _tg_reply(chat_id: int, reply_to: int, text: str):
+    if not chat_id or not reply_to:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "reply_to_message_id": reply_to, "text": text},
+            )
+    except Exception:
+        pass
+
+
 class ThreadStartIn(BaseModel):
     title: str
     wp_id: str = ""
     subject: str
+    telegram_chat_id: int = 0
+    telegram_thread_msg_id: int = 0
 
 
 @app.post("/thread/start")
@@ -334,6 +349,8 @@ async def thread_start(body: ThreadStartIn):
             "turn": turn,
         }).execute()
         await notify_turn(turn, "Chief Architect", acp)
+        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                        f"[Tour {turn}] Chief Architect\n\n{acp[:500]}")
         history.append({"role": "assistant", "content": acp})
 
         # Chief Analyst validates or objects
@@ -362,6 +379,8 @@ async def thread_start(body: ThreadStartIn):
                 "turn": turn,
             }).execute()
             await notify_turn(turn, "Chief Analyst (indisponible)", verdict)
+            await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                            f"[Tour {turn}] Chief Analyst indisponible\n\n{verdict[:500]}")
             break
 
         verdict_id = f"{thread_id}-T{turn}-ANAL"
@@ -374,10 +393,14 @@ async def thread_start(body: ThreadStartIn):
             "turn": turn,
         }).execute()
         await notify_turn(turn, f"Chief Analyst [{verdict_status}]", verdict)
+        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                        f"[Tour {turn}] Chief Analyst [{verdict_status}]\n\n{verdict[:500]}")
 
         if verdict_status == "VALIDATED":
             db.table("agent_threads").update({"status": "RESOLVED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
             await _tg(f"Discussion {thread_id} RESOLVED — consensus atteint au tour {turn}")
+            await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                            f"RESOLVED — consensus atteint au tour {turn}")
             resolved = True
             break
 
@@ -386,6 +409,8 @@ async def thread_start(body: ThreadStartIn):
     if not resolved:
         db.table("agent_threads").update({"status": "ESCALATED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
         await _tg(f"Discussion {thread_id} ESCALATED — 3 tours sans consensus. Decision CEO requise.")
+        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
+                        "ESCALATED — 3 tours sans consensus. Decision CEO requise.")
 
     messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
     return {"thread_id": thread_id, "status": "RESOLVED" if resolved else "ESCALATED", "messages": messages.data}
