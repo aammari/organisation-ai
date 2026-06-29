@@ -7,6 +7,7 @@ import openai
 import httpx
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_API_KEY, GROQ_MODEL
 from core.cost_tracker import CostTracker
+from core.context_loader import load_governance_context
 
 
 def load_kernel() -> str:
@@ -57,7 +58,12 @@ def qualify_intent(state: OrgState) -> OrgState:
 
 def call_architect(state: OrgState) -> OrgState:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    system = ARCHITECT_SYSTEM_PROMPT + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
+    governance_context = load_governance_context()
+    system = (
+        ARCHITECT_SYSTEM_PROMPT
+        + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
+        + "\n\n# CONTEXTE ORGANISATIONNEL\n\n" + governance_context
+    )
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=4096,
