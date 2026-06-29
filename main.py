@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from supabase import create_client
 
 from config import (
-    ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_MODEL,
+    ANTHROPIC_API_KEY, CLAUDE_MODEL,
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
 )
 from core.langgraph_app import workflow_app
@@ -133,7 +133,7 @@ def status():
         "last_cycle": last_cycle_data,
         "agents": {
             "chief_architect": CLAUDE_MODEL,
-            "chief_analyst": GROQ_MODEL,
+            "chief_analyst": "claude-haiku-4-5-20251001",
         },
         "cost": {
             "today_usd": round(daily_cost, 4),
@@ -257,7 +257,6 @@ async def backlog_add(
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 
 async def _tg(text: str):
@@ -287,7 +286,6 @@ class ThreadStartIn(BaseModel):
 
 @app.post("/thread/start")
 async def thread_start(body: ThreadStartIn):
-    import openai as _openai
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
     thread_id = f"THR-{uuid.uuid4().hex[:8].upper()}"
@@ -300,11 +298,7 @@ async def thread_start(body: ThreadStartIn):
 
     await _tg(f"Thread {thread_id} ouvert\n{body.title}")
 
-    architect_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    analyst_client = _openai.OpenAI(
-        api_key=GROQ_API_KEY,
-        base_url="https://api.groq.com/openai/v1",
-    )
+    anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     history = [{"role": "user", "content": body.subject}]
     resolved = False
@@ -312,7 +306,7 @@ async def thread_start(body: ThreadStartIn):
     for turn in range(1, 4):
         # Chief Architect produces ACP
         arch_resp = await asyncio.to_thread(
-            architect_client.messages.create,
+            anthropic_client.messages.create,
             model=CLAUDE_MODEL,
             max_tokens=2048,
             system=(
@@ -345,27 +339,19 @@ async def thread_start(body: ThreadStartIn):
         # Chief Analyst validates or objects
         try:
             analyst_resp = await asyncio.to_thread(
-                analyst_client.chat.completions.create,
-                model=GROQ_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
-                            "OBJECTION suivi de tes remarques sinon. Sois bref."
-                        ),
-                    },
-                    {"role": "user", "content": acp},
-                ],
+                anthropic_client.messages.create,
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                system=(
+                    "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
+                    "OBJECTION suivi de tes remarques sinon. Sois bref."
+                ),
+                messages=[{"role": "user", "content": acp}],
             )
-            verdict = analyst_resp.choices[0].message.content
+            verdict = analyst_resp.content[0].text
             verdict_status = "VALIDATED" if verdict.strip().upper().startswith("VALIDATED") else "OBJECTION"
-        except Exception as groq_err:
-            err_str = str(groq_err)
-            if "429" in err_str or "rate_limit" in err_str.lower():
-                verdict = "GROQ_RATE_LIMITED — quota TPD epuise. Thread escalade automatiquement."
-            else:
-                verdict = f"ANALYST_UNAVAILABLE — {err_str[:200]}"
+        except Exception as err:
+            verdict = f"ANALYST_UNAVAILABLE — {str(err)[:200]}"
             verdict_status = "ESCALATED"
             db.table("agent_messages").insert({
                 "id": f"{thread_id}-T{turn}-ANAL",
