@@ -87,13 +87,23 @@ def validate_output(state: OrgState) -> OrgState:
         return state
     client = openai.OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
     analyst_system = ANALYST_SYSTEM_PROMPT + "\n\n# DOCUMENTS FONDATEURS\n\n" + load_kernel()
-    client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": analyst_system},
-            {"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}
-        ]
-    )
+    try:
+        client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": analyst_system},
+                {"role": "user", "content": f"Valide ce livrable:\n\n{state['architect_output']}"}
+            ]
+        )
+    except Exception as e:
+        err = str(e)
+        if "429" in err or "rate_limit" in err.lower():
+            # Groq TPD épuisé — auto-validation dégradée pour ne pas bloquer le CEO
+            state["analyst_decision"] = "VALIDATED_DEGRADED"
+        else:
+            state["analyst_decision"] = "ANALYST_UNAVAILABLE"
+        state["final_response"] = state["architect_output"]
+        return state
     state["analyst_decision"] = "VALIDATED"
     state["final_response"] = state["architect_output"]
     return state
