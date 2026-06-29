@@ -6,6 +6,7 @@ import anthropic
 import openai
 import httpx
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, GROQ_API_KEY, GROQ_MODEL
+from core.cost_tracker import CostTracker
 
 
 def load_kernel() -> str:
@@ -64,6 +65,14 @@ def call_architect(state: OrgState) -> OrgState:
         messages=[{"role": "user", "content": state["ceo_request"]}]
     )
     state["architect_output"] = message.content[0].text
+    try:
+        CostTracker().log_cycle(
+            input_tokens=message.usage.input_tokens,
+            output_tokens=message.usage.output_tokens,
+            model=CLAUDE_MODEL,
+        )
+    except Exception:
+        pass
     return state
 
 

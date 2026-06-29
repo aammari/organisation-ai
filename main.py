@@ -4,10 +4,12 @@ import logging
 import os
 import subprocess
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 import anthropic
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from supabase import create_client
 
 from config import (
@@ -34,18 +36,17 @@ Réponds UNIQUEMENT en JSON valide :
 }"""
 
 
+def get_db():
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
 def check_supabase() -> str:
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        client.table("identifier_counters").select("prefix").limit(1).execute()
+        get_db().table("identifier_counters").select("prefix").limit(1).execute()
         return "online"
     except Exception as e:
         logger.warning(f"Supabase check failed: {e}")
         return "offline"
-
-
-def get_last_cycle() -> dict | None:
-    return _last_cycle
 
 
 async def keepalive_loop():
@@ -79,7 +80,11 @@ def health():
 
 @app.get("/status")
 def status():
-    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    db = get_db()
+    today = date.today().isoformat()
+    month = today[:7]
+    budget = 5.0
+
     try:
         last_er = (
             db.table("executive_requests")
@@ -88,16 +93,35 @@ def status():
             .limit(1)
             .execute()
         )
-        total = (
-            db.table("executive_requests")
-            .select("id", count="exact")
-            .execute()
-        )
-        last_cycle_data = last_er.data[0] if last_er.data else get_last_cycle()
+        total = db.table("executive_requests").select("id", count="exact").execute()
+        last_cycle_data = last_er.data[0] if last_er.data else _last_cycle
         cycles_total = total.count or 0
     except Exception:
-        last_cycle_data = get_last_cycle()
+        last_cycle_data = _last_cycle
         cycles_total = 0
+
+    try:
+        today_rows = db.table("api_usage").select("cost_usd").eq("date", today).execute()
+        daily_cost = sum(float(r["cost_usd"]) for r in today_rows.data)
+        month_rows = db.table("api_usage").select("cost_usd").like("date", f"{month}%").execute()
+        monthly_cost = sum(float(r["cost_usd"]) for r in month_rows.data)
+    except Exception:
+        daily_cost = 0.0
+        monthly_cost = 0.0
+
+    budget_pct = (monthly_cost / budget) * 100
+    cost_status = "OK" if budget_pct < 80 else "WARNING" if budget_pct < 100 else "CRITICAL"
+
+    try:
+        open_er = (
+            db.table("exception_reports")
+            .select("id", count="exact")
+            .eq("status", "OPEN")
+            .execute()
+        )
+        open_er_count = open_er.count or 0
+    except Exception:
+        open_er_count = 0
 
     return {
         "organization": "Organisation AI MVP",
@@ -109,6 +133,16 @@ def status():
         "agents": {
             "chief_architect": CLAUDE_MODEL,
             "chief_analyst": GROQ_MODEL,
+        },
+        "cost": {
+            "today_usd": round(daily_cost, 4),
+            "month_usd": round(monthly_cost, 4),
+            "budget_usd": budget,
+            "budget_pct": round(budget_pct, 1),
+            "status": cost_status,
+        },
+        "governance": {
+            "open_exception_reports": open_er_count,
         },
     }
 
@@ -140,9 +174,7 @@ async def execute_task(request: dict):
             executed.append(f"Created: {f['path']}")
 
         for cmd in plan.get("commands", []):
-            proc = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True
-            )
+            proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             output = proc.stdout.strip() or proc.stderr.strip()
             executed.append(f"Ran: {cmd} → {output[:200]}")
 
@@ -181,3 +213,12 @@ def run_cycle(request: dict):
         "analyst_decision": result["analyst_decision"],
         "response": result["final_response"],
     }
+
+
+# Dashboard CEO — served at root
+app.mount("/static", StaticFiles(directory="dashboard"), name="static")
+
+
+@app.get("/")
+def root():
+    return FileResponse("dashboard/index.html")

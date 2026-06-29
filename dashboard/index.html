@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Organisation AI — Dashboard CEO</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0f0f1a;
+      color: #e0e0ff;
+      padding: 20px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.4rem;
+      color: #7B68EE;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #2a2a4a;
+      padding-bottom: 10px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: #1a1a2e;
+      border-radius: 10px;
+      padding: 16px;
+      border: 1px solid #2a2a4a;
+    }
+    .label {
+      font-size: 0.7rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .value {
+      font-size: 1.8rem;
+      font-weight: bold;
+      margin-top: 6px;
+    }
+    .sub {
+      font-size: 0.75rem;
+      color: #888;
+      margin-top: 4px;
+    }
+    .ok { color: #3ECF8E; }
+    .warning { color: #F39C12; }
+    .critical { color: #E74C3C; }
+    .neutral { color: #7B68EE; }
+    .progress-bar {
+      background: #2a2a4a;
+      border-radius: 4px;
+      height: 8px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.5s;
+    }
+    .section {
+      background: #1a1a2e;
+      border-radius: 10px;
+      padding: 16px;
+      border: 1px solid #2a2a4a;
+      margin-bottom: 16px;
+    }
+    .section-title {
+      font-size: 0.75rem;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #2a2a4a;
+      font-size: 0.85rem;
+    }
+    .row:last-child { border-bottom: none; }
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot-green { background: #3ECF8E; }
+    .dot-orange { background: #F39C12; }
+    .refresh {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 0.75rem;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+  <h1>🏢 Organisation AI — Dashboard CEO</h1>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Phase</div>
+      <div class="value neutral" style="font-size:1rem" id="phase">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Cycles total</div>
+      <div class="value ok" id="cycles">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Coût aujourd'hui</div>
+      <div class="value" id="cost-today">—</div>
+      <div class="sub">USD</div>
+    </div>
+    <div class="card">
+      <div class="label">Budget mois (Phase 0)</div>
+      <div class="value" id="cost-month">—</div>
+      <div class="sub" id="budget-pct">/ $5.00</div>
+      <div class="progress-bar">
+        <div class="progress-fill ok" id="budget-bar" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Exception Reports</div>
+      <div class="value" id="open-er">—</div>
+      <div class="sub">ouverts</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Agents actifs</div>
+    <div class="row">
+      <span><span class="dot dot-green"></span>Chief Architect</span>
+      <span id="agent-arch" style="color:#888">—</span>
+    </div>
+    <div class="row">
+      <span><span class="dot dot-green"></span>Chief Analyst</span>
+      <span id="agent-ana" style="color:#888">—</span>
+    </div>
+    <div class="row">
+      <span><span class="dot dot-green"></span>Backend</span>
+      <span id="backend-status" style="color:#888">—</span>
+    </div>
+    <div class="row">
+      <span><span class="dot dot-green"></span>Supabase</span>
+      <span id="supabase-status" style="color:#888">—</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Dernier cycle</div>
+    <div id="last-cycle" style="font-size:0.85rem;color:#aaa">Chargement...</div>
+  </div>
+
+  <div class="refresh" id="refresh-time">Chargement...</div>
+
+  <script>
+    const API = 'https://organisation-ai.onrender.com/status';
+
+    function colorClass(status) {
+      return status === 'OK' ? 'ok' : status === 'WARNING' ? 'warning' : 'critical';
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch(API);
+        const d = await r.json();
+
+        document.getElementById('phase').textContent = d.phase || '—';
+        document.getElementById('cycles').textContent = d.cycles_total ?? 0;
+
+        const cost = d.cost || {};
+        const cls = colorClass(cost.status || 'OK');
+
+        const todayEl = document.getElementById('cost-today');
+        todayEl.textContent = '$' + (cost.today_usd || 0).toFixed(4);
+        todayEl.className = 'value ' + cls;
+
+        const monthEl = document.getElementById('cost-month');
+        monthEl.textContent = '$' + (cost.month_usd || 0).toFixed(4);
+        monthEl.className = 'value ' + cls;
+
+        document.getElementById('budget-pct').textContent =
+          (cost.budget_pct || 0).toFixed(1) + '% du budget Phase 0 ($' + (cost.budget_usd || 5) + ')';
+
+        const bar = document.getElementById('budget-bar');
+        bar.style.width = Math.min(cost.budget_pct || 0, 100) + '%';
+        bar.className = 'progress-fill ' + cls;
+
+        const erCount = d.governance?.open_exception_reports ?? 0;
+        const erEl = document.getElementById('open-er');
+        erEl.textContent = erCount;
+        erEl.className = 'value ' + (erCount === 0 ? 'ok' : 'warning');
+
+        document.getElementById('agent-arch').textContent =
+          d.agents?.chief_architect || '—';
+        document.getElementById('agent-ana').textContent =
+          d.agents?.chief_analyst || '—';
+        document.getElementById('backend-status').textContent =
+          d.backend || '—';
+        document.getElementById('supabase-status').textContent =
+          d.supabase || '—';
+
+        const last = d.last_cycle;
+        document.getElementById('last-cycle').innerHTML = last
+          ? `<strong>${last.qualified_intent || last.intent || 'ANALYSE'}</strong>
+             &nbsp;·&nbsp; Statut : ${last.status || '—'}
+             &nbsp;·&nbsp; ${new Date(last.created_at || last.timestamp).toLocaleString('fr-FR')}`
+          : 'Aucun cycle enregistré';
+
+        document.getElementById('refresh-time').textContent =
+          'Dernière mise à jour : ' + new Date().toLocaleTimeString('fr-FR');
+
+      } catch (e) {
+        document.getElementById('last-cycle').textContent =
+          '⚠️ Impossible de joindre le backend.';
+        document.getElementById('refresh-time').textContent =
+          'Erreur de connexion — ' + new Date().toLocaleTimeString('fr-FR');
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 30000);
+  </script>
+</body>
+</html>

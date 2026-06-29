@@ -101,6 +101,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📊 *Dashboard CEO*\nhttps://organisation-ai.onrender.com",
+        parse_mode='Markdown'
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Erreur Telegram: {context.error}", exc_info=context.error)
 
@@ -112,6 +119,7 @@ if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
