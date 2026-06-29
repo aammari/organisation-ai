@@ -349,7 +349,7 @@ async def thread_start(body: ThreadStartIn):
                 messages=[{"role": "user", "content": acp}],
             )
             verdict = analyst_resp.content[0].text
-            verdict_status = "VALIDATED" if verdict.strip().upper().startswith("VALIDATED") else "OBJECTION"
+            verdict_status = "VALIDATED" if "VALIDATED" in verdict.upper()[:40] else "OBJECTION"
         except Exception as err:
             verdict = f"ANALYST_UNAVAILABLE — {str(err)[:200]}"
             verdict_status = "ESCALATED"
