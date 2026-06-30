@@ -84,6 +84,28 @@ class OrgContextSync:
         except Exception:
             validations_data = {}
 
+        try:
+            escalated = (
+                db.table("doc_validations")
+                .select("document_id,remarks,thread_id")
+                .eq("status", "ESCALATED")
+                .execute()
+            )
+            escalations_data = [
+                {
+                    "doc_id": e["document_id"],
+                    "thread_id": e.get("thread_id", ""),
+                    "objections": [
+                        r["content"][:300]
+                        for r in (e["remarks"] or [])
+                        if r.get("decision") == "OBJECTION"
+                    ],
+                }
+                for e in (escalated.data or [])
+            ]
+        except Exception:
+            escalations_data = []
+
         ctx = {
             "id": "current",
             "version": "1.0",
@@ -91,6 +113,7 @@ class OrgContextSync:
             "backlog": backlog_data,
             "decisions": decisions_data,
             "validations": validations_data,
+            "escalations": escalations_data,
             "agents": {
                 "chief_architect": "claude-sonnet-4-6",
                 "chief_analyst": "claude-haiku-4-5-20251001",
@@ -141,6 +164,11 @@ class OrgContextSync:
             f"- {doc_id} : {v['status']} ({v['remarks_count']} remarques)"
             for doc_id, v in sorted(validations.items())
         )
+        escalations = ctx.get("escalations", [])
+        esc_lines = ""
+        for esc in escalations:
+            obj_text = "\n".join(f"  • {o}" for o in esc["objections"]) or "  (détails dans thread)"
+            esc_lines += f"- {esc['doc_id']} (thread: {esc['thread_id']}):\n{obj_text}\n"
         formatted = f"""
 # CONTEXTE ORGANISATIONNEL
 ## Agents
@@ -153,6 +181,9 @@ class OrgContextSync:
 
 ## Validations documents
 {val_lines or 'Aucune validation enregistrée'}
+
+## Escalades en attente CEO
+{esc_lines.strip() or 'Aucune escalade en attente'}
 
 ## Règles G-11
 - Signer chaque message
