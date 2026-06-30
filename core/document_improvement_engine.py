@@ -158,6 +158,7 @@ class DocumentImprovementEngine:
 
     async def _cycle(self, run: dict, doc_id: str, tg_notify) -> None:
         run_id = run["id"]
+        all_wp_ids: list[str] = []  # accumulates WP IDs across IMPLEMENTATION + COMPLIANCE
 
         # ── PRECHECK ──────────────────────────────────────────────────────
         self._update_run(run_id, {"status": "PRECHECK"})
@@ -296,23 +297,16 @@ class DocumentImprovementEngine:
         # ── IMPLEMENTATION — Create WPs ───────────────────────────────────
         if auto_fix or arch:
             self._update_run(run_id, {"status": "IMPLEMENTATION"})
-            wp_ids = []
             for r in auto_fix + arch:
                 wp_id = self._create_wp(doc_id, r, run_id)
                 if wp_id:
-                    wp_ids.append(wp_id)
-
-            existing_wps = run.get("work_packages_created") or []
-            if isinstance(existing_wps, str):
-                import json
-                existing_wps = json.loads(existing_wps)
-            self._update_run(run_id, {"work_packages_created": existing_wps + wp_ids})
-
-            if wp_ids:
+                    all_wp_ids.append(wp_id)
+            self._update_run(run_id, {"work_packages_created": all_wp_ids})
+            if all_wp_ids:
                 await tg_notify(
                     f"DIE — {doc_id}\n"
-                    f"{len(wp_ids)} WP(s) créé(s) pour amélioration :\n"
-                    + "\n".join(f"• {w}" for w in wp_ids[:5])
+                    f"{len(all_wp_ids)} WP(s) créé(s) pour amélioration :\n"
+                    + "\n".join(f"• {w}" for w in all_wp_ids[:5])
                     + "\nImplémentation requise avant revalidation."
                 )
 
@@ -320,18 +314,16 @@ class DocumentImprovementEngine:
         if val_result["status"] == "RESOLVED":
             self._update_run(run_id, {"status": "COMPLIANCE"})
             comp = compliance_engine.check_document_compliance(doc_id)
-            score = comp.get("score", 0)
+            comp_status = comp.get("status", "UNKNOWN")
+            # UNKNOWN = no rules defined for this doc → treat as fully compliant
+            score = 100 if comp_status == "UNKNOWN" else comp.get("score", 0)
             self._update_run(run_id, {"compliance_score": score})
 
             if score < COMPLIANCE_THRESHOLD:
-                # Create compliance WP
                 comp_wp_id = self._create_compliance_wp(doc_id, comp, run_id)
-                existing_wps = run.get("work_packages_created") or []
-                if isinstance(existing_wps, str):
-                    import json
-                    existing_wps = json.loads(existing_wps)
-                self._update_run(run_id, {"work_packages_created": existing_wps + ([comp_wp_id] if comp_wp_id else [])})
-                self._update_run(run_id, {"status": "IMPLEMENTATION"})
+                if comp_wp_id:
+                    all_wp_ids.append(comp_wp_id)
+                self._update_run(run_id, {"work_packages_created": all_wp_ids, "status": "IMPLEMENTATION"})
                 await tg_notify(
                     f"DIE — {doc_id}\nConformité {score}% (seuil {COMPLIANCE_THRESHOLD}%)\n"
                     f"{len(comp.get('gaps',[]))} gap(s) — WP créé : {comp_wp_id}"
@@ -339,7 +331,7 @@ class DocumentImprovementEngine:
                 return
 
             # ── ADOPTION_PROPOSAL ─────────────────────────────────────────
-            self._update_run(run_id, {"status": "ADOPTION_PROPOSAL", "adoption_proposed": True})
+            self._update_run(run_id, {"work_packages_created": all_wp_ids, "status": "ADOPTION_PROPOSAL", "adoption_proposed": True})
             await tg_notify(
                 f"DIE — {doc_id}\n\n"
                 f"Validation : OK\n"
@@ -350,6 +342,7 @@ class DocumentImprovementEngine:
             )
         else:
             # ESCALATED from agents
+            self._update_run(run_id, {"work_packages_created": all_wp_ids})
             if iteration + 1 >= MAX_ITERATIONS:
                 self._update_run(run_id, {
                     "status": "ESCALATED",
