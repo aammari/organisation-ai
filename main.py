@@ -28,6 +28,7 @@ from core.adoption_service import adoption_svc
 from core.context_service import context_svc
 from core.compliance_engine import compliance_engine
 from core.goal_planner import goal_planner
+from core.document_improvement_engine import die
 
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
@@ -1067,6 +1068,77 @@ async def goal_plan(request: dict):
     if not goal:
         raise HTTPException(status_code=422, detail="goal required")
     return await goal_planner.produce_plan(goal)
+
+
+# ── WP-M06 — Document Improvement Engine ───────────────────────────────────
+
+@app.post("/improve/doc")
+async def improve_doc(request: dict, background_tasks: BackgroundTasks):
+    doc_id = request.get("doc_id", "").strip().upper()
+    if not doc_id:
+        raise HTTPException(status_code=422, detail="doc_id required")
+    run = die.create_run(doc_id)
+    background_tasks.add_task(die.run_cycle, run["id"], _tg)
+    return {"run_id": run["id"], "doc_id": doc_id, "status": "SUBMITTED"}
+
+
+@app.get("/improve/status/{run_id}")
+async def improve_status(run_id: str):
+    run = die.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return run
+
+
+@app.get("/improve/doc/{doc_id}")
+async def improve_doc_latest(doc_id: str):
+    run = die.get_latest_run(doc_id.upper())
+    if not run:
+        return {"status": "NO_RUN", "doc_id": doc_id.upper()}
+    return run
+
+
+@app.get("/improve/list")
+async def improve_list(status: str = ""):
+    if status:
+        return {"runs": die.list_runs_by_status(status.upper())}
+    # Return all recent runs
+    try:
+        db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        rows = (
+            db.table("improvement_runs")
+            .select("id,doc_id,status,iteration,compliance_score,adoption_proposed,updated_at")
+            .order("updated_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        return {"runs": rows.data or []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/improve/check/{doc_id}")
+async def improve_check_github(doc_id: str, background_tasks: BackgroundTasks):
+    """Check if GitHub commit changed; if so, start new improvement cycle."""
+    result = await die.check_github_change(doc_id.upper())
+    if result.get("changed"):
+        run = die.create_run(doc_id.upper())
+        background_tasks.add_task(die.run_cycle, run["id"], _tg)
+        return {**result, "action": "REVALIDATION_STARTED", "run_id": run["id"]}
+    return {**result, "action": "NO_CHANGE"}
+
+
+@app.post("/improve/adopt/{doc_id}")
+async def improve_accept_adoption(doc_id: str):
+    """CEO confirms adoption proposal from DIE."""
+    doc_id = doc_id.upper()
+    run = die.get_latest_run(doc_id)
+    if not run or run.get("status") != "ADOPTION_PROPOSAL":
+        raise HTTPException(status_code=422, detail=f"No pending adoption proposal for {doc_id}")
+    result = await adoption_svc.request_adoption(doc_id)
+    if result.get("status") in ("ADOPTED", "WAITING_CEO"):
+        die.accept_adoption_proposal(doc_id, run["id"])
+    return result
 
 
 # Dashboard CEO — served at root
