@@ -379,7 +379,6 @@ async def _wf_footballiq() -> str:
         return f"Erreur analyse readiness : {e}"
 
     readiness = plan["readiness"]
-    comp_score = plan["compliance_score"]
     missing = plan["missing_documents"]
     adopted_docs = plan["adopted_documents"]
 

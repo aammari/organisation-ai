@@ -1,0 +1,35 @@
+[
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 15,
+      "row": 382
+    },
+    "filename": "/home/runner/work/organisation-ai/organisation-ai/core/conversation_engine.py",
+    "fix": {
+      "applicability": "unsafe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 18,
+            "row": 382
+          },
+          "location": {
+            "column": 5,
+            "row": 382
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `comp_score`"
+    },
+    "location": {
+      "column": 5,
+      "row": 382
+    },
+    "message": "Local variable `comp_score` is assigned to but never used",
+    "noqa_row": 382,
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  }
+]
