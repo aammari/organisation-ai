@@ -218,6 +218,120 @@ async def _handle_validate_batch(update: Update):
         await update.message.reply_text(f"Erreur lancement batch : {e}")
 
 
+async def _handle_adopt(update: Update, doc_id: str):
+    await update.message.reply_text(f"Adoption {doc_id} en cours...")
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{BACKEND_URL}/adoption/request", json={"doc_id": doc_id})
+            r.raise_for_status()
+            result = r.json()
+        status = result.get("status", "?")
+        if status == "ADOPTED":
+            await update.message.reply_text(
+                f"{doc_id} — ADOPTED\n"
+                f"Version: {result.get('version', '?')}\n"
+                f"SHA: {result.get('doc_sha', '?')}\n"
+                f"Decision: {result.get('decision_level', '?')}"
+            )
+        elif status == "WAITING_CEO":
+            await update.message.reply_text(
+                f"{doc_id} — WAITING_CEO (D3)\nApprobation CEO requise."
+            )
+        elif status == "REFUSED":
+            await update.message.reply_text(
+                f"{doc_id} — REFUSÉ\nRaison: {result.get('reason', '?')}\n{result.get('detail', '')}"
+            )
+        else:
+            await update.message.reply_text(f"{doc_id} — {status}\n{result.get('detail', '')}")
+    except Exception as e:
+        logger.error(f"adopt {doc_id}: {e}")
+        await update.message.reply_text(f"Erreur adoption {doc_id}: {e}")
+
+
+async def _handle_compliance_doc(update: Update, doc_id: str):
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.get(f"{BACKEND_URL}/compliance/doc/{doc_id}")
+            r.raise_for_status()
+            result = r.json()
+        gaps = result.get("gaps", [])
+        gap_lines = "\n".join(f"• [{g['severity']}] {g['description']}" for g in gaps[:3]) or "Aucun"
+        await update.message.reply_text(
+            f"Conformité {doc_id} — {result.get('status', '?')}\n"
+            f"Score: {result.get('score', 0)}%\n"
+            f"Gaps:\n{gap_lines}"
+        )
+    except Exception as e:
+        logger.error(f"compliance_doc {doc_id}: {e}")
+        await update.message.reply_text(f"Erreur conformité {doc_id}: {e}")
+
+
+async def _handle_certification(update: Update):
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.get(f"{BACKEND_URL}/compliance/status")
+            r.raise_for_status()
+            result = r.json()
+        await update.message.reply_text(
+            f"Certification organisationnelle\n"
+            f"Score global: {result.get('overall_score', 0)}%\n"
+            f"Docs vérifiés: {result.get('documents_checked', 0)}\n"
+            f"Conformes: {result.get('compliant', 0)}\n"
+            f"Partiels: {result.get('partial', 0)}\n"
+            f"Non-conformes: {result.get('non_compliant', 0)}\n"
+            f"Gaps ouverts: {len(result.get('gaps', []))}"
+        )
+    except Exception as e:
+        logger.error(f"certification: {e}")
+        await update.message.reply_text(f"Erreur certification: {e}")
+
+
+async def _handle_readiness(update: Update):
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            comp = await c.get(f"{BACKEND_URL}/compliance/status")
+            comp.raise_for_status()
+            adop = await c.get(f"{BACKEND_URL}/adoption/registry")
+            adop.raise_for_status()
+        comp_data = comp.json()
+        adop_data = adop.json()
+        adopted = adop_data.get("adopted", [])
+        await update.message.reply_text(
+            f"Readiness organisationnelle\n"
+            f"Docs adoptés: {len(adopted)}\n"
+            f"Score conformité: {comp_data.get('overall_score', 0)}%\n"
+            f"Gaps ouverts: {len(comp_data.get('gaps', []))}\n"
+            f"Documents: {', '.join(d['doc_id'] for d in adopted[:5]) or 'Aucun'}"
+        )
+    except Exception as e:
+        logger.error(f"readiness: {e}")
+        await update.message.reply_text(f"Erreur readiness: {e}")
+
+
+async def _handle_goal(update: Update, goal: str):
+    await update.message.reply_text(f"Analyse objectif: {goal[:60]}...")
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{BACKEND_URL}/goal/plan", json={"goal": goal})
+            r.raise_for_status()
+            result = r.json()
+        wps = result.get("proposed_work_packages", [])
+        blockers = result.get("blockers", [])
+        wp_lines = "\n".join(f"{w['order']}. {w['title']}" for w in wps[:4])
+        blocker_lines = "\n".join(f"• {b}" for b in blockers[:3]) or "Aucun"
+        await update.message.reply_text(
+            f"Objectif analysé.\n"
+            f"Readiness: {result.get('readiness', 0)}%\n"
+            f"Bloquants: {len(blockers)}\n"
+            f"{blocker_lines}\n\n"
+            f"Plan proposé:\n{wp_lines or 'Aucun WP requis'}\n\n"
+            f"Décision CEO requise: {'oui' if result.get('requires_ceo_approval') else 'non'}"
+        )
+    except Exception as e:
+        logger.error(f"goal_plan: {e}")
+        await update.message.reply_text(f"Erreur analyse objectif: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
     message = update.message.text.strip()
@@ -243,16 +357,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"intervene lookup: {e}")
 
-    # PRIORITÉ 2 — Validation manuelle "valide G-XX" / "valide tous"
+    # PRIORITÉ 2 — Commandes structurées (déterministes, sans LLM)
     msg_lower = message.lower()
+
+    # "valide G-XX" / "valide tous"
     if msg_lower.startswith("valide"):
         if re.search(r"tous|all|batch", msg_lower):
             await _handle_validate_batch(update)
             return
-        m = re.search(r"g-(\d+)", msg_lower)
+        m = re.search(r"([a-z])-(\d+)", msg_lower)
         if m:
-            await _handle_validate_single(update, f"G-{m.group(1).zfill(2)}")
+            await _handle_validate_single(update, f"{m.group(1).upper()}-{m.group(2).zfill(2)}")
             return
+
+    # "adopte G-XX" → adoption request
+    if msg_lower.startswith("adopt"):
+        m = re.search(r"([a-z])-(\d+)", msg_lower)
+        if m:
+            await _handle_adopt(update, f"{m.group(1).upper()}-{m.group(2).zfill(2)}")
+            return
+
+    # "conformite G-XX" → compliance doc
+    if re.match(r"conformit[eé]", msg_lower):
+        m = re.search(r"([a-z])-(\d+)", msg_lower)
+        if m:
+            await _handle_compliance_doc(update, f"{m.group(1).upper()}-{m.group(2).zfill(2)}")
+        else:
+            await _handle_certification(update)
+        return
+
+    # "certification" → global compliance score
+    if msg_lower.strip() in ("certification", "certif"):
+        await _handle_certification(update)
+        return
+
+    # "readiness" → context + compliance summary
+    if msg_lower.strip() in ("readiness", "maturité", "maturite"):
+        await _handle_readiness(update)
+        return
+
+    # "prépare X" / "prepare X" → goal planner
+    if re.match(r"(prépare|prepare|planifie|objectif)\s+", msg_lower):
+        goal = re.sub(r"^(prépare|prepare|planifie|objectif)\s+", "", message.strip(), flags=re.IGNORECASE)
+        await _handle_goal(update, goal)
+        return
 
     # PRIORITÉ 3 — Tout le reste via /route (Chief of Staff unifié)
     await update.message.reply_text("Traitement en cours...")
