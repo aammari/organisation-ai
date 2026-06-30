@@ -439,8 +439,8 @@ async def _wf_org_blockers() -> str:
             level = w.get("required_decision_level", "D3")
             lines.append(f"\n• {w['id']} ({level})")
             lines.append(f"  Titre : {w.get('title','')[:60]}")
-            lines.append(f"  Impact si approuvé : exécution déléguée au Chief of Staff.")
-            lines.append(f"  Impact si refusé : WP archivé.")
+            lines.append("  Impact si approuvé : exécution déléguée au Chief of Staff.")
+            lines.append("  Impact si refusé : WP archivé.")
             lines.append(f"  Commande : A {w['id']}")
 
     # ── Catégorie 2 : Blocages techniques ──
@@ -521,14 +521,14 @@ async def _wf_footballiq() -> str:
     ]
 
     if missing:
-        lines += [f"\nManquants :", _doc_list(missing)]
+        lines += ["\nManquants :", _doc_list(missing)]
 
     if plan["blockers"]:
-        lines.append(f"\nBlockeurs :")
+        lines.append("\nBlockeurs :")
         for b in plan["blockers"][:4]:
             lines.append(f"• {b}")
 
-    lines += [SEP, f"\nImpact attendu :", f"{impact_line}"]
+    lines += [SEP, "\nImpact attendu :", f"{impact_line}"]
 
     if plan["requires_ceo_approval"]:
         lines.append("\n⚠ Décision D3 CEO requise avant tout lancement.")
@@ -539,7 +539,7 @@ async def _wf_footballiq() -> str:
         raw_actions.append({
             "key": doc,
             "text": f"Adopter {doc}",
-            "why": f"Document requis pour FootballIQ — bloque la readiness.",
+            "why": "Document requis pour FootballIQ — bloque la readiness.",
             "cmd": f"adopte {doc}",
         })
     for wp in plan.get("proposed_work_packages", [])[:3]:
@@ -630,32 +630,32 @@ async def _wf_doc_status(doc_ids: list[str]) -> str:
     if canonical == "ADOPTED":
         lines.append("\nAucune action requise.")
     elif canonical == "WAITING_CEO":
-        lines.append(f"\nJe recommande d'approuver ce document.")
-        lines.append(f"Pourquoi : décision D3 bloquante — l'organisation attend votre validation.")
-        lines.append(f"Impact : débloque l'adoption et les flux dépendants.")
-        lines.append(f"Risque : faible — adoption réversible.")
-        lines.append(f"Commande : A <WP-ID associé>")
+        lines.append("\nJe recommande d'approuver ce document.")
+        lines.append("Pourquoi : décision D3 bloquante — l'organisation attend votre validation.")
+        lines.append("Impact : débloque l'adoption et les flux dépendants.")
+        lines.append("Risque : faible — adoption réversible.")
+        lines.append("Commande : A <WP-ID associé>")
     elif canonical == "ADOPTION_PROPOSAL":
         lines.append(f"\nJe recommande d'adopter {doc_id}.")
-        lines.append(f"Pourquoi : document validé et conforme — prêt à entrer en vigueur.")
-        lines.append(f"Impact : améliore la readiness FootballIQ et la conformité organisationnelle.")
-        lines.append(f"Risque : faible — adoption réversible.")
+        lines.append("Pourquoi : document validé et conforme — prêt à entrer en vigueur.")
+        lines.append("Impact : améliore la readiness FootballIQ et la conformité organisationnelle.")
+        lines.append("Risque : faible — adoption réversible.")
         lines.append(f"Commande : adopte {doc_id}")
     elif canonical == "ESCALATED":
         lines.append(f"\nLa prochaine étape est de relancer l'amélioration de {doc_id}.")
-        lines.append(f"Pourquoi : validation escaladée — correction requise avant adoption.")
-        lines.append(f"Impact : débloque la chaîne d'adoption.")
-        lines.append(f"Risque : faible — déclenche un cycle DIE automatique.")
+        lines.append("Pourquoi : validation escaladée — correction requise avant adoption.")
+        lines.append("Impact : débloque la chaîne d'adoption.")
+        lines.append("Risque : faible — déclenche un cycle DIE automatique.")
         lines.append(f"Commande : améliore {doc_id}")
     elif canonical in ("VALIDATED", "CHANGES_REQUIRED"):
         lines.append(f"\nJe recommande d'adopter {doc_id}.")
-        lines.append(f"Pourquoi : validation RESOLVED — aucun blocage restant.")
-        lines.append(f"Impact : un document de plus actif dans l'organisation.")
+        lines.append("Pourquoi : validation RESOLVED — aucun blocage restant.")
+        lines.append("Impact : un document de plus actif dans l'organisation.")
         lines.append(f"Commande : adopte {doc_id}")
     else:
         lines.append(f"\nLa prochaine étape est de valider {doc_id}.")
-        lines.append(f"Pourquoi : aucune validation existante — étape préalable obligatoire.")
-        lines.append(f"Impact : ouvre la voie à l'adoption.")
+        lines.append("Pourquoi : aucune validation existante — étape préalable obligatoire.")
+        lines.append("Impact : ouvre la voie à l'adoption.")
         lines.append(f"Commande : valide {doc_id}")
 
     return "\n".join(lines)
@@ -720,9 +720,9 @@ async def _wf_explain_wp(wp_id: str) -> str:
             "\nConséquences :",
             "• Si approuvé (A) : le WP sera exécuté par le Chief of Staff.",
             "• Si refusé (B)  : le WP sera archivé (statut REJECTED).",
-            f"\nRisque : exécution irréversible selon le type d'action.",
+            "\nRisque : exécution irréversible selon le type d'action.",
             SEP,
-            f"\nCommande :",
+            "\nCommande :",
             f"  Approuver : A {wp_id}",
             f"  Refuser   : B {wp_id}",
         ]
@@ -772,8 +772,8 @@ async def _wf_executive_advice() -> str:
     elif prop_docs:
         primary = {
             "text": f"Adopter {prop_docs[0]}",
-            "why": f"Document validé et conforme — prêt à entrer en vigueur.",
-            "impact": f"Réduit le nombre de documents non adoptés et améliore la readiness FootballIQ.",
+            "why": "Document validé et conforme — prêt à entrer en vigueur.",
+            "impact": "Réduit le nombre de documents non adoptés et améliore la readiness FootballIQ.",
             "cmd": f"adopte {prop_docs[0]}",
             "risk": "Faible — adoption réversible par une nouvelle décision CEO.",
         }
@@ -806,7 +806,7 @@ async def _wf_executive_advice() -> str:
     lines = [
         f"Résumé exécutif — {_today()}",
         SEP,
-        f"\nPriorité principale :",
+        "\nPriorité principale :",
         f"\n{primary['text']}",
         f"\nPourquoi : {primary['why']}",
         f"Impact : {primary['impact']}",
