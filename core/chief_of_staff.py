@@ -15,8 +15,9 @@ DELEGATED_LEVEL_RANK = {"D1": 1, "D2": 2, "D3": 3}
 ACTIVE_WP_ID = os.getenv("ACTIVE_WP_ID", "WP-Sprint2-001")
 
 _ESCALATION_PREFIXES = ("A", "B")
-_THREAD_KEYWORDS = {"débat", "discut", "valide", "validation", "thread"}
-_SIMPLE_KEYWORDS = {"status", "état", "liste", "combien", "qui", "résume"}
+# Only explicit debate/thread triggers → everything else goes to ConversationEngine
+_THREAD_KEYWORDS = {"débat", "discut", "thread"}
+_SIMPLE_KEYWORDS: set[str] = set()  # ConversationEngine handles all cycle intents
 
 
 def _now() -> str:
@@ -52,10 +53,9 @@ class ChiefOfStaff:
             route = "escalation"
         elif any(k in msg.lower() for k in _THREAD_KEYWORDS):
             route = "thread"
-        elif any(k in msg.lower() for k in _SIMPLE_KEYWORDS):
-            route = "cycle_simple"
         else:
-            route = await self._qualify_with_haiku(msg)
+            # All other messages → ConversationEngine (no Haiku here)
+            route = "cycle"
 
         try:
             self.db.table("action_ledger").update({
