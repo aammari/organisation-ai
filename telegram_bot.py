@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import re
+from pathlib import Path
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -133,6 +135,73 @@ async def qualify_intent(message: str) -> dict:
         return {"route": "cycle"}
 
 
+_DOCS_DIR = Path(__file__).parent / "docs" / "governance"
+
+_GOV_FILES = {
+    "G-01": "MeetingProtocol-G01-v1_0.md",
+    "G-02": "DataRetention-G02-v1_0.md",
+    "G-03": "AgentOnboarding-G03-v1_0.md",
+    "G-04": "ConfigManagement-G04-v1_0.md",
+    "G-05": "SecurityPolicy-G05-v1_0.md",
+    "G-06": "CapabilityLifecycle-G06-v1_0.md",
+    "G-07": "Glossary-G07-v1_0.md",
+    "G-08": "ExceptionWaiver-G08-v1_0.md",
+    "G-09": "AIEthics-G09-v1_0.md",
+    "G-10": "OrgHealthReview-G10-v1_0.md",
+    "G-11": "CEOCommunicationProtocol-G11-v1_1.md",
+}
+
+
+async def _handle_validate_single(update: Update, doc_id: str):
+    filename = _GOV_FILES.get(doc_id)
+    if not filename:
+        await update.message.reply_text(f"Document {doc_id} inconnu.")
+        return
+    path = _DOCS_DIR / filename
+    if not path.exists():
+        await update.message.reply_text(f"Fichier {filename} introuvable.")
+        return
+    content = path.read_text()
+    await update.message.reply_text(f"Validation {doc_id} en cours...")
+    try:
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.post(
+                f"{BACKEND_URL}/validate/doc",
+                json={"doc_id": doc_id, "content": content},
+            )
+            r.raise_for_status()
+            result = r.json()
+        status = result.get("status", "?")
+        remarks = result.get("remarks", [])
+        await update.message.reply_text(
+            f"Validation {doc_id} — {status}\n"
+            f"Remarques Chief Analyst : {len(remarks)}\n"
+            f"Thread : {result.get('thread_id')}"
+        )
+    except Exception as e:
+        logger.error(f"validate_single {doc_id}: {e}")
+        await update.message.reply_text(f"Erreur validation {doc_id} : {e}")
+
+
+async def _handle_validate_batch(update: Update):
+    docs = []
+    for doc_id, filename in _GOV_FILES.items():
+        path = _DOCS_DIR / filename
+        if path.exists():
+            docs.append({"id": doc_id, "content": path.read_text()})
+    await update.message.reply_text(f"Batch validation lancé — {len(docs)} documents en file.\nCEO notifié après chaque document.")
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{BACKEND_URL}/validate/batch",
+                json={"documents": docs},
+            )
+            r.raise_for_status()
+    except Exception as e:
+        logger.error(f"validate_batch: {e}")
+        await update.message.reply_text(f"Erreur lancement batch : {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
     message = update.message.text
@@ -157,6 +226,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except Exception as e:
             logger.warning(f"intervene lookup: {e}")
+
+    # Validation pattern — "valide G-XX" or "valide tous les G"
+    msg_lower = message.lower()
+    if msg_lower.startswith("valide"):
+        batch_match = re.search(r"tous|all|batch", msg_lower)
+        single_match = re.search(r"g-(\d+)", msg_lower)
+        if batch_match:
+            await _handle_validate_batch(update)
+            return
+        if single_match:
+            await _handle_validate_single(update, f"G-{single_match.group(1).zfill(2)}")
+            return
 
     await update.message.reply_text("Traitement en cours...")
 

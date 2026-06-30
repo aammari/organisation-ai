@@ -9,7 +9,7 @@ from datetime import datetime, date, timezone
 
 import anthropic
 import httpx
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -326,31 +326,32 @@ async def thread_intervene(body: ThreadInterveneIn):
     return {"updated": updated}
 
 
-@app.post("/thread/start")
-async def thread_start(body: ThreadStartIn):
+async def _run_thread(
+    title: str,
+    wp_id: str,
+    subject: str,
+    tg_chat_id: int = 0,
+    tg_msg_id: int = 0,
+) -> dict:
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
     thread_id = f"THR-{uuid.uuid4().hex[:8].upper()}"
     db.table("agent_threads").insert({
         "id": thread_id,
-        "title": body.title,
-        "wp_id": body.wp_id or None,
+        "title": title,
+        "wp_id": wp_id or None,
         "status": "OPEN",
-        "telegram_chat_id": body.telegram_chat_id or None,
-        "telegram_thread_msg_id": body.telegram_thread_msg_id or None,
+        "telegram_chat_id": tg_chat_id or None,
+        "telegram_thread_msg_id": tg_msg_id or None,
     }).execute()
 
-    await _tg(f"Thread {thread_id} ouvert\n{body.title}")
+    await _tg(f"Thread {thread_id} ouvert\n{title}")
 
     anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    subject = body.subject
     history = [{"role": "user", "content": subject}]
     resolved = False
     ceo_stopped = False
 
     for turn in range(1, 4):
-        # Check CEO intervention
         try:
             row = db.table("agent_threads").select("ceo_input").eq("id", thread_id).single().execute()
             ceo_input = (row.data or {}).get("ceo_input")
@@ -363,28 +364,22 @@ async def thread_start(body: ThreadStartIn):
                 db.table("agent_threads").update({
                     "status": "CEO_STOPPED", "updated_at": datetime.now(timezone.utc).isoformat()
                 }).eq("id", thread_id).execute()
-                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                                "CEO_STOPPED — discussion arrêtée par le CEO.")
+                await _tg_reply(tg_chat_id, tg_msg_id, "CEO_STOPPED — discussion arrêtée par le CEO.")
                 ceo_stopped = True
                 break
             elif ceo_lower in ("valide", "validé", "ok", "approved"):
                 db.table("agent_threads").update({
                     "status": "CEO_VALIDATED", "updated_at": datetime.now(timezone.utc).isoformat()
                 }).eq("id", thread_id).execute()
-                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                                "CEO_VALIDATED — discussion validée par le CEO.")
+                await _tg_reply(tg_chat_id, tg_msg_id, "CEO_VALIDATED — discussion validée par le CEO.")
                 resolved = True
                 break
             else:
-                # Inject CEO context and notify agents
-                await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                                f"CEO intervient : {ceo_input}")
+                await _tg_reply(tg_chat_id, tg_msg_id, f"CEO intervient : {ceo_input}")
                 subject = subject + f"\n\nCEO : {ceo_input}"
                 history.append({"role": "user", "content": f"Instruction CEO : {ceo_input}"})
-                # Clear intervention so it isn't re-applied
                 db.table("agent_threads").update({"ceo_input": None}).eq("id", thread_id).execute()
 
-        # Chief Architect produces ACP — Sonnet pour tour 1, Haiku pour tours 2+
         arch_task = "thread_turn_1" if turn == 1 else f"thread_turn_{turn}"
         arch_model = get_model_for_task(arch_task)
         arch_resp = await asyncio.to_thread(
@@ -406,9 +401,8 @@ async def thread_start(body: ThreadStartIn):
         except Exception:
             pass
         acp = arch_resp.content[0].text
-        msg_id = f"{thread_id}-T{turn}-ARCH"
         db.table("agent_messages").insert({
-            "id": msg_id,
+            "id": f"{thread_id}-T{turn}-ARCH",
             "thread_id": thread_id,
             "sender": "chief-architect",
             "content": acp,
@@ -416,15 +410,13 @@ async def thread_start(body: ThreadStartIn):
             "turn": turn,
         }).execute()
         await notify_turn(turn, "Chief Architect", acp)
-        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                        f"[Tour {turn}] Chief Architect\n\n{acp[:500]}")
+        await _tg_reply(tg_chat_id, tg_msg_id, f"[Tour {turn}] Chief Architect\n\n{acp[:500]}")
         history.append({"role": "assistant", "content": acp})
 
-        # Chief Analyst validates or objects
         try:
             analyst_resp = await asyncio.to_thread(
                 anthropic_client.messages.create,
-                model="claude-haiku-4-5-20251001",
+                model=get_model_for_task("validate"),
                 max_tokens=512,
                 system=(
                     "Tu es Chief Analyst. Réponds VALIDATED si l'ACP est acceptable, "
@@ -446,13 +438,11 @@ async def thread_start(body: ThreadStartIn):
                 "turn": turn,
             }).execute()
             await notify_turn(turn, "Chief Analyst (indisponible)", verdict)
-            await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                            f"[Tour {turn}] Chief Analyst indisponible\n\n{verdict[:500]}")
+            await _tg_reply(tg_chat_id, tg_msg_id, f"[Tour {turn}] Chief Analyst indisponible\n\n{verdict[:500]}")
             break
 
-        verdict_id = f"{thread_id}-T{turn}-ANAL"
         db.table("agent_messages").insert({
-            "id": verdict_id,
+            "id": f"{thread_id}-T{turn}-ANAL",
             "thread_id": thread_id,
             "sender": "chief-analyst",
             "content": verdict,
@@ -460,14 +450,12 @@ async def thread_start(body: ThreadStartIn):
             "turn": turn,
         }).execute()
         await notify_turn(turn, f"Chief Analyst [{verdict_status}]", verdict)
-        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                        f"[Tour {turn}] Chief Analyst [{verdict_status}]\n\n{verdict[:500]}")
+        await _tg_reply(tg_chat_id, tg_msg_id, f"[Tour {turn}] Chief Analyst [{verdict_status}]\n\n{verdict[:500]}")
 
         if verdict_status == "VALIDATED":
             db.table("agent_threads").update({"status": "RESOLVED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
             await _tg(f"Discussion {thread_id} RESOLVED — consensus atteint au tour {turn}")
-            await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                            f"RESOLVED — consensus atteint au tour {turn}")
+            await _tg_reply(tg_chat_id, tg_msg_id, f"RESOLVED — consensus atteint au tour {turn}")
             resolved = True
             break
 
@@ -476,13 +464,101 @@ async def thread_start(body: ThreadStartIn):
     if not resolved and not ceo_stopped:
         db.table("agent_threads").update({"status": "ESCALATED", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", thread_id).execute()
         await _tg(f"Discussion {thread_id} ESCALATED — 3 tours sans consensus. Decision CEO requise.")
-        await _tg_reply(body.telegram_chat_id, body.telegram_thread_msg_id,
-                        "ESCALATED — 3 tours sans consensus. Decision CEO requise.")
+        await _tg_reply(tg_chat_id, tg_msg_id, "ESCALATED — 3 tours sans consensus. Decision CEO requise.")
 
     thread_row = db.table("agent_threads").select("status").eq("id", thread_id).single().execute()
     final_status = (thread_row.data or {}).get("status", "ESCALATED")
     messages = db.table("agent_messages").select("*").eq("thread_id", thread_id).order("turn").execute()
     return {"thread_id": thread_id, "status": final_status, "messages": messages.data}
+
+
+@app.post("/thread/start")
+async def thread_start(body: ThreadStartIn):
+    return await _run_thread(
+        title=body.title,
+        wp_id=body.wp_id,
+        subject=body.subject,
+        tg_chat_id=body.telegram_chat_id,
+        tg_msg_id=body.telegram_thread_msg_id,
+    )
+
+
+async def _validate_single_doc(doc_id: str, content: str) -> dict:
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    thread = await _run_thread(
+        title=f"Validation {doc_id}",
+        wp_id="WP-Sprint2-001",
+        subject=(
+            f"Valide le document {doc_id}.\n"
+            "Analyse chaque section. Note les points forts et les remarques.\n\n"
+            f"CONTENU :\n{content[:3000]}"
+        ),
+    )
+    remarks = [
+        {
+            "tour": msg["turn"],
+            "decision": "VALIDATED" if "VALIDATED" in msg["content"].upper()[:40] else "OBJECTION",
+            "content": msg["content"][:500],
+        }
+        for msg in thread.get("messages", [])
+        if msg["sender"] == "chief-analyst"
+    ]
+    val_id = f"VAL-{doc_id}-{thread['thread_id']}"
+    db.table("doc_validations").insert({
+        "id": val_id,
+        "document_id": doc_id,
+        "thread_id": thread["thread_id"],
+        "status": thread["status"],
+        "remarks": remarks,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return {"doc_id": doc_id, "thread_id": thread["thread_id"], "status": thread["status"], "remarks": remarks}
+
+
+@app.post("/validate/doc")
+async def validate_doc(request: dict):
+    doc_id = request.get("doc_id", "")
+    content = request.get("content", "")
+    if not doc_id or not content:
+        raise HTTPException(status_code=422, detail="doc_id and content are required")
+    return await _validate_single_doc(doc_id, content)
+
+
+@app.get("/validate/status")
+async def validate_status():
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    result = db.table("doc_validations").select("*").order("validated_at", desc=True).execute()
+    rows = result.data or []
+    return {
+        "total": len(rows),
+        "resolved": len([r for r in rows if r["status"] == "RESOLVED"]),
+        "escalated": len([r for r in rows if r["status"] == "ESCALATED"]),
+        "documents": rows,
+    }
+
+
+async def _run_batch_validation(docs: list):
+    for doc in docs:
+        try:
+            result = await _validate_single_doc(doc["id"], doc["content"])
+            await _tg(
+                f"Validation {doc['id']} — {result['status']}\n"
+                f"Remarques : {len(result['remarks'])}"
+            )
+        except Exception as e:
+            await _tg(f"Erreur validation {doc['id']} : {str(e)[:200]}")
+        await asyncio.sleep(30)
+    await _tg(f"Batch validation terminé — {len(docs)} documents traités.")
+
+
+@app.post("/validate/batch")
+async def validate_batch(request: dict, background_tasks: BackgroundTasks):
+    docs = request.get("documents", [])
+    if not docs:
+        raise HTTPException(status_code=422, detail="documents list is required")
+    background_tasks.add_task(_run_batch_validation, docs)
+    await _tg(f"Batch validation démarré — {len(docs)} documents en file.")
+    return {"queued": len(docs), "message": "Validation lancée en arrière-plan. CEO notifié à chaque doc."}
 
 
 @app.get("/thread/{thread_id}")
