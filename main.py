@@ -512,7 +512,24 @@ async def _validate_single_doc(doc_id: str, content: str) -> dict:
         "remarks": remarks,
         "validated_at": datetime.now(timezone.utc).isoformat(),
     }).execute()
-    return {"doc_id": doc_id, "thread_id": thread["thread_id"], "status": thread["status"], "remarks": remarks}
+    result = {"doc_id": doc_id, "thread_id": thread["thread_id"], "status": thread["status"], "remarks": remarks}
+
+    if thread["status"] == "ESCALATED":
+        objections = [r for r in remarks if r["decision"] == "OBJECTION"]
+        points = "\n".join(
+            f"• Tour {r['tour']} : {r['content'][:150]}..."
+            for r in objections
+        )
+        await _tg(
+            f"ESCALADE — {doc_id}\n\n"
+            f"Les agents n'ont pas atteint consensus.\n\n"
+            f"Points bloquants :\n{points or 'Voir thread ' + thread['thread_id']}\n\n"
+            f"Action requise :\n"
+            f"A — Corriger le document\n"
+            f"B — Valider en l'état (dérogation CEO)"
+        )
+
+    return result
 
 
 @app.post("/validate/doc")
@@ -541,10 +558,12 @@ async def _run_batch_validation(docs: list):
     for doc in docs:
         try:
             result = await _validate_single_doc(doc["id"], doc["content"])
-            await _tg(
-                f"Validation {doc['id']} — {result['status']}\n"
-                f"Remarques : {len(result['remarks'])}"
-            )
+            # ESCALATED notification already sent inside _validate_single_doc
+            if result["status"] != "ESCALATED":
+                await _tg(
+                    f"Validation {doc['id']} — {result['status']}\n"
+                    f"Remarques : {len(result['remarks'])}"
+                )
         except Exception as e:
             await _tg(f"Erreur validation {doc['id']} : {str(e)[:200]}")
         await asyncio.sleep(30)
