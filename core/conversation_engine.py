@@ -63,7 +63,7 @@ _AUDIT_KW = [
     "relis les doc", "relis les documents", "compare l'existant",
     "compare avec l'existant", "compare avec ce qui est",
     "audit org", "revue org", "analyse les documents",
-    "compare les documents",
+    "compare les documents", "audite", "audit ",
 ]
 
 _DOC_STATUS_KW = [
@@ -1016,7 +1016,8 @@ async def _wf_pending_adoptions() -> str:
     non_adopted: list[tuple[str, str, str | None]] = []
 
     for doc_id in all_g_docs:
-        if adopted_map.get(doc_id, {}).get("status") == "ADOPTED":
+        # list_adopted() already filters by status=ADOPTED — presence in map is sufficient
+        if doc_id in adopted_map:
             continue
         try:
             val_rows = (db.table("doc_validations").select("status")
@@ -1419,7 +1420,9 @@ class ConversationEngine:
                     "source": "deterministic", "doc_ids": []}
 
         # ── Pre-classification E: executive advice (ECT-03, ECT-07) ─────────────
-        if any(k in msg_lower for k in _ADVICE_INTENT_KW):
+        # Guard: FootballIQ-specific advice → let _wf_footballiq handle via FOOTBALLIQ_READINESS
+        _is_footballiq_query = any(k in msg_lower for k in _FOOTBALLIQ_KW)
+        if any(k in msg_lower for k in _ADVICE_INTENT_KW) and not _is_footballiq_query:
             response = await _wf_executive_advice()
             logger.info("CE pre-class=EXECUTIVE_ADVICE")
             return {"intent": "EXECUTIVE_ADVICE", "confidence": 1.0, "response": response,
