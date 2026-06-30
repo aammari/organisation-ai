@@ -262,7 +262,7 @@ async def _wf_org_status() -> str:
         SEP,
         f"\nConformité : {comp_score}% — {len(comp['gaps'])} gap(s) ouvert(s)",
         SEP,
-        f"\nWork Packages",
+        "\nWork Packages",
         f"En attente : {wp_pending}  |  En cours : {wp_running}  |  Décision CEO : {len(waiting_ceo)}",
     ]
 
@@ -331,7 +331,7 @@ async def _wf_org_blockers() -> str:
         gap_codes = ", ".join(g["code"] for g in comp["gaps"][:4])
         lines.append(f"\n{rank}. Conformité insuffisante ({comp_score}%)")
         lines.append(f"   Gaps : {gap_codes}")
-        lines.append(f"   → Objectif : atteindre 95%")
+        lines.append("   → Objectif : atteindre 95%")
         rank += 1
 
     if waiting:
@@ -413,14 +413,14 @@ async def _wf_footballiq() -> str:
     ]
 
     if missing:
-        lines += [f"\nManquants :", _doc_list(missing)]
+        lines += ["\nManquants :", _doc_list(missing)]
 
     if plan["blockers"]:
-        lines.append(f"\nBlockeurs :")
+        lines.append("\nBlockeurs :")
         for b in plan["blockers"][:4]:
             lines.append(f"• {b}")
 
-    lines += [SEP, f"\nImpact attendu :", f"{impact_line}"]
+    lines += [SEP, "\nImpact attendu :", f"{impact_line}"]
 
     if plan["requires_ceo_approval"]:
         lines.append("\n⚠ Décision D3 CEO requise avant tout lancement.")
@@ -431,7 +431,7 @@ async def _wf_footballiq() -> str:
         raw_actions.append({
             "key": doc,
             "text": f"Adopter {doc}",
-            "why": f"Document requis pour FootballIQ — bloque la readiness.",
+            "why": "Document requis pour FootballIQ — bloque la readiness.",
             "cmd": f"adopte {doc}",
         })
     for wp in plan.get("proposed_work_packages", [])[:3]:
@@ -488,7 +488,7 @@ async def _wf_doc_status(doc_ids: list[str]) -> str:
         alert = "✓ Document adopté et actif."
     elif val_status == "ESCALATED":
         health = "Critique"
-        alert = f"⚠ Validation ESCALATED — intervention requise."
+        alert = "⚠ Validation ESCALATED — intervention requise."
     elif adop_status == "WAITING_CEO":
         health = "Attention"
         alert = "⚠ Décision D3 CEO attendue."
