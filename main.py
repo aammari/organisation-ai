@@ -520,16 +520,72 @@ async def _validate_single_doc(doc_id: str, content: str) -> dict:
             f"• Tour {r['tour']} : {r['content'][:150]}..."
             for r in objections
         )
+        objections_text = points or f"Voir thread {thread['thread_id']}"
+        # Persist escalation for CEO response tracking
+        esc_id = f"ESC-{doc_id}-{thread['thread_id']}"
+        db.table("pending_escalations").insert({
+            "id": esc_id,
+            "doc_id": doc_id,
+            "thread_id": thread["thread_id"],
+            "status": "WAITING_CEO",
+            "objections": objections_text,
+        }).execute()
         await _tg(
             f"ESCALADE — {doc_id}\n\n"
             f"Les agents n'ont pas atteint consensus.\n\n"
-            f"Points bloquants :\n{points or 'Voir thread ' + thread['thread_id']}\n\n"
+            f"Points bloquants :\n{objections_text}\n\n"
             f"Action requise :\n"
             f"A — Corriger le document\n"
             f"B — Valider en l'état (dérogation CEO)"
         )
 
     return result
+
+
+@app.post("/escalation/respond")
+async def escalation_respond(request: dict):
+    response = request.get("response", "").strip().upper()
+    if response not in ("A", "B"):
+        raise HTTPException(status_code=422, detail="response must be A or B")
+
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    pending = (
+        db.table("pending_escalations")
+        .select("*")
+        .eq("status", "WAITING_CEO")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not pending.data:
+        return {"handled": False, "message": "Aucune escalade en attente"}
+
+    esc = pending.data[0]
+    doc_id = esc["doc_id"]
+    objections_text = esc.get("objections", "")
+
+    if response == "A":
+        await _tg(f"Correction lancée pour {doc_id}\nLes agents produisent v1.1...")
+        await _run_thread(
+            title=f"Correction {doc_id} v1.1",
+            wp_id="WP-Sprint2-001",
+            subject=(
+                f"Produis une version corrigée de {doc_id}.\n"
+                f"Points à corriger identifiés lors de la validation précédente :\n"
+                f"{objections_text}\n\n"
+                f"Produis le document corrigé complet."
+            ),
+        )
+    else:
+        db.table("doc_validations").update({"status": "CEO_VALIDATED"}).eq("document_id", doc_id).execute()
+        await _tg(f"Dérogation appliquée — {doc_id}\nValidé en l'état par CEO.")
+
+    db.table("pending_escalations").update({
+        "status": "RESOLVED",
+        "ceo_response": response,
+    }).eq("id", esc["id"]).execute()
+
+    return {"handled": True, "doc_id": doc_id, "response": response}
 
 
 @app.post("/validate/doc")
