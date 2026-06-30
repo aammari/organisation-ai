@@ -210,33 +210,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
-    # DEBUG — inspecter le message et les escalades en attente
-    logger.info(f"[DEBUG] message repr={repr(message)}")
-    logger.info(f"[DEBUG] upper={message.upper()!r} in_ab={message.upper() in ('A', 'B')}")
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{BACKEND_URL}/escalation/pending")
-            pending_esc = r.json().get("pending", [])
-        logger.info(f"[DEBUG] escalades WAITING_CEO: {pending_esc}")
-    except Exception as e:
-        logger.info(f"[DEBUG] escalade check error: {e}")
-
     # PRIORITÉ 1 — Réponse escalade CEO (avant tout autre routing)
-    if message.upper() in ("A", "B"):
+    # Formats acceptés : "A", "B", "A G-02", "B G-03"
+    parts = message.split()
+    if parts and parts[0].upper() in ("A", "B"):
+        response = parts[0].upper()
+        target_doc = parts[1].upper() if len(parts) > 1 else None
         try:
+            payload: dict = {"response": response}
+            if target_doc:
+                payload["doc_id"] = target_doc
             async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.post(
-                    f"{BACKEND_URL}/escalation/respond",
-                    json={"response": message.upper()},
-                )
+                r = await c.post(f"{BACKEND_URL}/escalation/respond", json=payload)
                 r.raise_for_status()
                 data = r.json()
             if data.get("handled"):
                 doc_id = data["doc_id"]
-                if message.upper() == "A":
-                    await update.message.reply_text(f"Correction {doc_id} v1.1 lancée. Les agents travaillent...")
+                remaining = data.get("remaining", 0)
+                if response == "A":
+                    reply = f"Correction {doc_id} v1.1 lancée. Les agents travaillent..."
                 else:
-                    await update.message.reply_text(f"Dérogation CEO enregistrée — {doc_id} validé en l'état.")
+                    reply = f"Dérogation CEO enregistrée — {doc_id} validé en l'état."
+                if remaining > 0:
+                    reply += f"\n{remaining} escalade(s) encore en attente."
+                await update.message.reply_text(reply)
                 return
             # handled=False → no pending escalation, fall through to normal routing
         except Exception as e:

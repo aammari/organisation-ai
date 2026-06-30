@@ -570,6 +570,7 @@ async def _run_correction(esc: dict):
 @app.post("/escalation/respond")
 async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
     response = request.get("response", "").strip().upper()
+    target_doc_id = request.get("doc_id")  # optional — None means FIFO
     if response not in ("A", "B"):
         raise HTTPException(status_code=422, detail="response must be A or B")
 
@@ -578,17 +579,22 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
         db.table("pending_escalations")
         .select("*")
         .eq("status", "WAITING_CEO")
-        .order("created_at", desc=True)
-        .limit(1)
+        .order("created_at", desc=False)  # oldest first → FIFO
         .execute()
     )
     if not pending.data:
         return {"handled": False, "message": "Aucune escalade en attente"}
 
-    esc = pending.data[0]
-    doc_id = esc["doc_id"]
+    if len(pending.data) == 1:
+        esc = pending.data[0]
+    elif target_doc_id:
+        esc = next((e for e in pending.data if e["doc_id"] == target_doc_id), pending.data[0])
+    else:
+        esc = pending.data[0]  # FIFO: oldest waiting
 
-    # Mark resolved immediately so CEO gets fast response
+    doc_id = esc["doc_id"]
+    remaining = len(pending.data) - 1
+
     db.table("pending_escalations").update({
         "status": "RESOLVED",
         "ceo_response": response,
@@ -600,7 +606,14 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
         db.table("doc_validations").update({"status": "CEO_VALIDATED"}).eq("document_id", doc_id).execute()
         await _tg(f"Dérogation appliquée — {doc_id}\nValidé en l'état par CEO.")
 
-    return {"handled": True, "doc_id": doc_id, "response": response}
+    if remaining > 0:
+        next_docs = [e["doc_id"] for e in pending.data if e["doc_id"] != doc_id]
+        await _tg(
+            f"{remaining} escalade(s) encore en attente : {', '.join(next_docs)}\n"
+            f"Réponds A/B ou 'A {next_docs[0]}' pour cibler un document précis."
+        )
+
+    return {"handled": True, "doc_id": doc_id, "response": response, "remaining": remaining}
 
 
 @app.get("/escalation/pending")
@@ -640,32 +653,30 @@ async def validate_status():
 
 async def _run_batch_validation(docs: list):
     for doc in docs:
+        doc_id = doc["id"]
+        # Isolation totale : une exception sur un doc ne bloque pas les suivants
         try:
-            result = await _validate_single_doc(doc["id"], doc["content"])
-            if result["status"] == "ESCALATED":
-                # _validate_single_doc already called _handle_escalation,
-                # but call it again explicitly if the first attempt silently failed
-                pending = (
-                    create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-                    .table("pending_escalations")
-                    .select("id")
-                    .eq("doc_id", doc["id"])
-                    .eq("status", "WAITING_CEO")
-                    .execute()
-                )
-                if not pending.data:
-                    await _handle_escalation(
-                        doc["id"], result["thread_id"], result["remarks"]
-                    )
-            else:
-                await _tg(
-                    f"Validation {doc['id']} — {result['status']}\n"
-                    f"Remarques : {len(result['remarks'])}"
-                )
+            result = await _validate_single_doc(doc_id, doc["content"])
         except Exception as e:
-            logger.error(f"batch validate {doc['id']}: {e}")
-            await _tg(f"Erreur validation {doc['id']} : {str(e)[:200]}")
-        await asyncio.sleep(30)
+            logger.error(f"batch validate {doc_id}: {e}")
+            result = {"status": "ERROR", "error": str(e), "remarks": [], "thread_id": ""}
+
+        status = result.get("status", "ERROR")
+        if status == "ESCALATED":
+            try:
+                await _handle_escalation(doc_id, result["thread_id"], result["remarks"])
+            except Exception as e:
+                logger.error(f"_handle_escalation {doc_id}: {e}")
+                await _tg(
+                    f"ESCALADE — {doc_id} (notification dégradée)\n"
+                    f"Erreur : {str(e)[:100]}\n"
+                    f"Vérifie /validate/status manuellement."
+                )
+        else:
+            icon = "OK" if status == "RESOLVED" else "ERREUR"
+            await _tg(f"{icon} — {doc_id} : {status}")
+
+        await asyncio.sleep(20)
     await _tg(f"Batch validation terminé — {len(docs)} documents traités.")
 
 
