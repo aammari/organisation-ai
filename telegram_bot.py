@@ -208,46 +208,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user.username or update.message.from_user.first_name
     chat_id = update.message.chat.id
     _ceo_chat_id = chat_id
-    logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
+    logger.info(f"Message de {user} (chat_id={chat_id}): {message[:80]}")
 
-    # PRIORITÉ 1 — Réponse escalade CEO (avant tout autre routing)
-    # Formats acceptés : "A", "B", "A G-02", "B G-03"
-    parts = message.split()
-    if parts and parts[0].upper() in ("A", "B"):
-        response = parts[0].upper()
-        target_doc = parts[1].upper() if len(parts) > 1 else None
-        try:
-            payload: dict = {"response": response}
-            if target_doc:
-                payload["doc_id"] = target_doc
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.post(f"{BACKEND_URL}/escalation/respond", json=payload)
-                r.raise_for_status()
-                data = r.json()
-            if data.get("handled"):
-                doc_id = data["doc_id"]
-                remaining = data.get("remaining", 0)
-                if response == "A":
-                    reply = f"Correction {doc_id} v1.1 lancée. Les agents travaillent..."
-                else:
-                    reply = f"Dérogation CEO enregistrée — {doc_id} validé en l'état."
-                if remaining > 0:
-                    reply += f"\n{remaining} escalade(s) encore en attente."
-                await update.message.reply_text(reply)
-                return
-            # handled=False → no pending escalation, fall through to normal routing
-        except Exception as e:
-            logger.error(f"escalation_respond: {e}")
-
-    # PRIORITÉ 2 — Intervention CEO dans un thread actif (reply_to)
+    # PRIORITÉ 1 — Intervention CEO dans un thread actif (reply_to)
+    # Garde-fou : traité avant routing pour ne pas perdre le contexte thread
     reply_to = update.message.reply_to_message
     if reply_to:
-        reply_msg_id = reply_to.message_id
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.post(
                     f"{BACKEND_URL}/thread/intervene",
-                    json={"telegram_thread_msg_id": reply_msg_id, "text": message},
+                    json={"telegram_thread_msg_id": reply_to.message_id, "text": message},
                 )
                 data = r.json()
             if data.get("updated", 0) > 0:
@@ -256,63 +227,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"intervene lookup: {e}")
 
-    # Validation pattern — "valide G-XX" or "valide tous les G"
+    # PRIORITÉ 2 — Validation manuelle "valide G-XX" / "valide tous"
     msg_lower = message.lower()
     if msg_lower.startswith("valide"):
-        batch_match = re.search(r"tous|all|batch", msg_lower)
-        single_match = re.search(r"g-(\d+)", msg_lower)
-        if batch_match:
+        if re.search(r"tous|all|batch", msg_lower):
             await _handle_validate_batch(update)
             return
-        if single_match:
-            await _handle_validate_single(update, f"G-{single_match.group(1).zfill(2)}")
+        m = re.search(r"g-(\d+)", msg_lower)
+        if m:
+            await _handle_validate_single(update, f"G-{m.group(1).zfill(2)}")
             return
 
+    # PRIORITÉ 3 — Tout le reste via /route (Chief of Staff unifié)
     await update.message.reply_text("Traitement en cours...")
+    try:
+        async with httpx.AsyncClient(timeout=300) as c:
+            r = await c.post(f"{BACKEND_URL}/route", json={"message": message})
+            r.raise_for_status()
+            result = r.json()
+        logger.info(f"route={result.get('route')} action={result.get('action_id')}")
 
-    route_info = await qualify_intent(message)
-    route = route_info.get("route", "cycle")
-    logger.info(f"Chief of Staff route: {route}")
-
-    if route == "thread":
-        subject = route_info.get("subject", message)
-        try:
+        # Thread case: open in Telegram then start on backend with msg_id
+        if result.get("route") == "thread" and not result.get("thread_id"):
             opening = await update.message.reply_text("Ouverture de la discussion inter-agents...")
-            thread_msg_id = opening.message_id
-
             async with httpx.AsyncClient(timeout=300) as c:
-                r = await c.post(
+                r2 = await c.post(
                     f"{BACKEND_URL}/thread/start",
                     json={
-                        "title": subject[:100],
+                        "title": message[:100],
                         "wp_id": "WP-Sprint2-001",
-                        "subject": subject,
+                        "subject": message,
                         "telegram_chat_id": update.message.chat_id,
-                        "telegram_thread_msg_id": thread_msg_id,
+                        "telegram_thread_msg_id": opening.message_id,
                     },
                 )
-                r.raise_for_status()
-        except Exception as e:
-            logger.error(f"Erreur thread: {type(e).__name__}: {e}")
-            await update.message.reply_text(f"Erreur discussion: {e}")
-        return
+                r2.raise_for_status()
+            return
 
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"{BACKEND_URL}/cycle", json={"message": message})
-            response.raise_for_status()
-            result = response.json()
-            logger.info(f"Backend répondu: intent={result.get('intent')}, decision={result.get('analyst_decision')}")
-
-        reply = f"Chief Architect\n\n{result.get('response', 'Aucune réponse.')}"
-        await update.message.reply_text(reply, parse_mode=None)
+        response_text = result.get("response", str(result))
+        await send_long_message(update, response_text)
 
     except httpx.HTTPStatusError as e:
         logger.error(f"Erreur backend HTTP {e.response.status_code}: {e.response.text}")
-        await update.message.reply_text(f"❌ Erreur backend ({e.response.status_code}). Réessayez.")
+        await update.message.reply_text(f"Erreur backend ({e.response.status_code}). Réessayez.")
     except Exception as e:
         logger.error(f"Erreur inattendue: {type(e).__name__}: {e}")
-        await update.message.reply_text(f"❌ Erreur: {e}")
+        await update.message.reply_text(f"Erreur: {e}")
 
 
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -22,6 +22,7 @@ from config import (
 from core.langgraph_app import workflow_app, get_model_for_task
 from core.cost_tracker import CostTracker
 from core.context_sync import OrgContextSync
+from core.chief_of_staff import cos
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ async def keepalive_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(keepalive_loop())
+    asyncio.create_task(cos.process_backlog())
     yield
 
 
@@ -567,13 +569,7 @@ async def _run_correction(esc: dict):
     )
 
 
-@app.post("/escalation/respond")
-async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
-    response = request.get("response", "").strip().upper()
-    target_doc_id = request.get("doc_id")  # optional — None means FIFO
-    if response not in ("A", "B"):
-        raise HTTPException(status_code=422, detail="response must be A or B")
-
+async def _run_escalation_respond(response: str, target_doc_id: str | None, background_tasks: BackgroundTasks) -> dict:
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     pending = (
         db.table("pending_escalations")
@@ -590,7 +586,7 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
     elif target_doc_id:
         esc = next((e for e in pending.data if e["doc_id"] == target_doc_id), pending.data[0])
     else:
-        esc = pending.data[0]  # FIFO: oldest waiting
+        esc = pending.data[0]
 
     doc_id = esc["doc_id"]
     remaining = len(pending.data) - 1
@@ -614,6 +610,69 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
         )
 
     return {"handled": True, "doc_id": doc_id, "response": response, "remaining": remaining}
+
+
+@app.post("/escalation/respond")
+async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
+    response = request.get("response", "").strip().upper()
+    if response not in ("A", "B"):
+        raise HTTPException(status_code=422, detail="response must be A or B")
+    return await _run_escalation_respond(response, request.get("doc_id"), background_tasks)
+
+
+@app.post("/route")
+async def route_message(request: dict, background_tasks: BackgroundTasks):
+    message = request.get("message", "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message is required")
+
+    action_id = await cos.log_action("telegram", message)
+    decision = await cos.route_request(message, action_id)
+    route = decision["route"]
+
+    if route == "escalation":
+        parts = message.split()
+        response = parts[0].upper()
+        doc_id = parts[1].upper() if len(parts) > 1 else None
+        result = await _run_escalation_respond(response, doc_id, background_tasks)
+        reply = (
+            f"Escalade résolue — {result['doc_id']}"
+            if result.get("handled")
+            else result.get("message", "Aucune escalade en attente")
+        )
+        return {"response": reply, "route": route, "action_id": action_id}
+
+    if route == "thread":
+        thread = await _run_thread(
+            title=message[:100],
+            wp_id="WP-Sprint2-001",
+            subject=message,
+        )
+        return {
+            "response": thread.get("final_response", "Discussion terminée."),
+            "thread_id": thread.get("thread_id"),
+            "status": thread.get("status"),
+            "route": route,
+            "action_id": action_id,
+        }
+
+    # cycle_simple or cycle
+    state = workflow_app.invoke({
+        "ceo_request": message,
+        "intent": None,
+        "priority": None,
+        "workflow_state": "IMPLEMENTING",
+        "architect_output": None,
+        "analyst_decision": None,
+        "deviation": None,
+        "execution_result": None,
+        "final_response": None,
+    })
+    cos.db.table("action_ledger").update({
+        "state": "DONE",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", action_id).execute()
+    return {"response": state.get("final_response", ""), "route": route, "action_id": action_id}
 
 
 @app.get("/escalation/pending")
