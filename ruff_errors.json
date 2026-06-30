@@ -4,7 +4,7 @@
     "code": "F841",
     "end_location": {
       "column": 15,
-      "row": 382
+      "row": 490
     },
     "filename": "/home/runner/work/organisation-ai/organisation-ai/core/conversation_engine.py",
     "fix": {
@@ -14,11 +14,11 @@
           "content": "",
           "end_location": {
             "column": 18,
-            "row": 382
+            "row": 490
           },
           "location": {
             "column": 5,
-            "row": 382
+            "row": 490
           }
         }
       ],
@@ -26,10 +26,10 @@
     },
     "location": {
       "column": 5,
-      "row": 382
+      "row": 490
     },
     "message": "Local variable `comp_score` is assigned to but never used",
-    "noqa_row": 382,
+    "noqa_row": 490,
     "url": "https://docs.astral.sh/ruff/rules/unused-variable"
   }
 ]
