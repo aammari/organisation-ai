@@ -21,6 +21,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 BACKEND_URL = "https://organisation-ai.onrender.com"
 PORT = int(os.getenv("PORT", 8080))
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
 CHIEF_OF_STAFF_PROMPT = """Tu es Chief of Staff. Tu qualifies l'intention du CEO et routes vers le bon agent.
 
@@ -69,43 +70,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(f"{BACKEND_URL}/status")
-            response.raise_for_status()
-            data = response.json()
+            m = await client.get(f"{BACKEND_URL}/observability/metrics?source=telegram")
+            m.raise_for_status()
+            metrics = m.json()
+            e = await client.get(f"{BACKEND_URL}/observability/errors")
+            e.raise_for_status()
+            errors = e.json()
 
-        cost = data.get("cost", {})
-        by_agent = cost.get("by_agent", {})
+        wp = metrics.get("wp_by_status", {})
+        failed_total = metrics["total_work_packages_failed"]
+        alert_lines = []
+        if metrics["waiting_ceo_count"] > 0:
+            alert_lines.append(f"  {metrics['waiting_ceo_count']} WP en attente CEO")
+        if failed_total > 0:
+            alert_lines.append(f"  {failed_total} WP FAILED/ERROR")
+        if errors.get("failed_actions"):
+            alert_lines.append(f"  {len(errors['failed_actions'])} action(s) FAILED")
 
-        agent_lines = ""
-        for model, info in by_agent.items():
-            name = "Chief Architect" if "claude" in model else "Chief Analyst"
-            agent_lines += (
-                f"  • {name} : `${info['cost_usd']:.4f}` "
-                f"({info['cycles']} cycles, "
-                f"{info['input_tokens'] + info['output_tokens']:,} tokens)\n"
-            )
+        last_run = metrics.get("last_backlog_run_at") or "—"
+        if last_run and last_run != "—":
+            last_run = last_run[:19].replace("T", " ") + " UTC"
 
-        budget_pct = cost.get("budget_pct", 0)
-        budget_icon = "🟢" if budget_pct < 80 else "🟡" if budget_pct < 100 else "🔴"
-
-        no_cycle = "  Aucun cycle aujourd'hui"
         msg = (
-            f"🏢 *Organisation AI*\n"
-            f"Phase : `{data.get('phase', '—')}`  |  "
-            f"Backend : ✅  |  Supabase : `{data.get('supabase', '—')}`\n\n"
-            f"💰 *Coûts aujourd'hui*\n"
-            f"  Total   : `${cost.get('today_usd', 0):.4f}`\n"
-            f"  Ce mois : `${cost.get('month_usd', 0):.4f}`\n"
-            f"  Budget  : {budget_icon} `{budget_pct:.1f}%` / $5.00\n\n"
-            f"🤖 *Par agent*\n"
-            f"{agent_lines or no_cycle}\n"
-            f"📊 Cycles total : `{data.get('cycles_total', 0)}`"
+            f"Organisation AI — Status\n\n"
+            f"WP :\n"
+            f"  PENDING : {wp.get('PENDING', 0)}\n"
+            f"  RUNNING : {wp.get('RUNNING', 0)}\n"
+            f"  WAITING_CEO : {metrics['waiting_ceo_count']}\n"
+            f"  FAILED : {failed_total}\n"
+            f"  DONE : {metrics['total_work_packages_done']}\n\n"
+            f"Actions aujourd'hui : {metrics['total_actions_today']}\n\n"
+            f"Derniere activite :\n  {last_run}\n"
+            f"  Temps moyen traitement : {metrics['average_processing_time_seconds']}s\n\n"
+            f"Alertes :\n{chr(10).join(alert_lines) if alert_lines else '  Aucune'}"
         )
-        await update.message.reply_text(msg, parse_mode='Markdown')
+        await update.message.reply_text(msg, parse_mode=None)
 
     except Exception as e:
         logger.error(f"Erreur /status: {e}")
-        await update.message.reply_text(f"❌ Impossible de récupérer le statut : {e}")
+        await update.message.reply_text(f"Impossible de recuperer le statut : {e}")
 
 
 async def send_long_message(update: Update, text: str):
@@ -240,9 +243,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # PRIORITÉ 3 — Tout le reste via /route (Chief of Staff unifié)
     await update.message.reply_text("Traitement en cours...")
+    _route_headers = {"X-Internal-Token": INTERNAL_TOKEN} if INTERNAL_TOKEN else {}
     try:
         async with httpx.AsyncClient(timeout=300) as c:
-            r = await c.post(f"{BACKEND_URL}/route", json={"message": message})
+            r = await c.post(f"{BACKEND_URL}/route", json={"message": message}, headers=_route_headers)
             r.raise_for_status()
             result = r.json()
         logger.info(f"route={result.get('route')} action={result.get('action_id')}")
