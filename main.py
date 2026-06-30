@@ -1077,9 +1077,16 @@ async def improve_doc(request: dict, background_tasks: BackgroundTasks):
     doc_id = request.get("doc_id", "").strip().upper()
     if not doc_id:
         raise HTTPException(status_code=422, detail="doc_id required")
-    run = die.create_run(doc_id)
+    # Reuse an existing IMPLEMENTATION run (M06-H5: iteration counter accumulates)
+    existing = die.get_latest_run(doc_id)
+    if existing and existing.get("status") == "IMPLEMENTATION":
+        run = existing
+        reused = True
+    else:
+        run = die.create_run(doc_id)
+        reused = False
     background_tasks.add_task(die.run_cycle, run["id"], _tg)
-    return {"run_id": run["id"], "doc_id": doc_id, "status": "SUBMITTED"}
+    return {"run_id": run["id"], "doc_id": doc_id, "status": "SUBMITTED", "reused_run": reused}
 
 
 @app.get("/improve/status/{run_id}")
