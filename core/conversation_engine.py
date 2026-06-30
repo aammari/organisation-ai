@@ -129,6 +129,51 @@ def _classify_deterministic(message: str) -> tuple[str, list[str]]:
     return "UNKNOWN", doc_ids
 
 
+# ── Rendering helpers (formatting only — no workflow logic) ───────────────────
+
+
+def _health_label(comp_score: int, n_escalated: int, n_d3: int) -> str:
+    if comp_score < 70 or n_escalated >= 3 or n_d3 >= 3:
+        return "Critique"
+    if comp_score < 95 or n_escalated or n_d3:
+        return "Attention"
+    return "Stable"
+
+
+def _alerts_block(comp_score: int, escalated: list[str], waiting_ceo: list[dict]) -> str:
+    parts = []
+    if comp_score < 95:
+        parts.append(f"⚠ Conformité {comp_score}% — seuil 95% non atteint")
+    for w in waiting_ceo[:2]:
+        parts.append(f"⚠ Décision D3 attendue : {w.get('id', '?')}")
+    for doc in escalated[:2]:
+        parts.append(f"⚠ Validation ESCALATED : {doc}")
+    return "\n".join(parts) if parts else "✓ Aucun risque majeur."
+
+
+def _doc_list(docs: list[str], max_n: int = 6) -> str:
+    shown = docs[:max_n]
+    rest = len(docs) - len(shown)
+    lines = [f"• {d}" for d in shown]
+    if rest:
+        lines.append(f"• +{rest} autre(s)")
+    return "\n".join(lines) if lines else "• Aucun"
+
+
+def _top_actions(items: list[dict], limit: int = 5) -> list[dict]:
+    """Deduplicate by key and cap at limit."""
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        key = item.get("key", item.get("text", ""))
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
 # ── Workflow handlers (all return formatted strings) ───────────────────────────
 
 async def _wf_org_status() -> str:
@@ -140,44 +185,97 @@ async def _wf_org_status() -> str:
         return f"Erreur lecture organisation : {e}"
 
     try:
-        wp_rows = (db.table("work_packages").select("status")
+        wp_rows = (db.table("work_packages").select("id,status,priority,title")
                    .in_("status", ["PENDING", "RUNNING", "CLAIMED", "WAITING_CEO"])
                    .execute())
-        wp_counts: dict[str, int] = {}
-        for row in (wp_rows.data or []):
-            s = row.get("status", "?")
-            wp_counts[s] = wp_counts.get(s, 0) + 1
+        wps = wp_rows.data or []
     except Exception:
-        wp_counts = {}
+        wps = []
+
+    try:
+        esc_rows = (db.table("doc_validations").select("document_id")
+                    .eq("status", "ESCALATED")
+                    .order("validated_at", desc=True).limit(5).execute())
+        escalated = list(dict.fromkeys(r["document_id"] for r in (esc_rows.data or [])))
+    except Exception:
+        escalated = []
 
     runs_impl = die.list_runs_by_status("IMPLEMENTATION")
     runs_prop = die.list_runs_by_status("ADOPTION_PROPOSAL")
     runs_esc = die.list_runs_by_status("ESCALATED")
 
+    waiting_ceo = [w for w in wps if w.get("status") == "WAITING_CEO"]
+    wp_pending = len([w for w in wps if w.get("status") in ("PENDING", "CLAIMED")])
+    wp_running = len([w for w in wps if w.get("status") == "RUNNING"])
+    comp_score = comp["overall_score"]
+
+    health = _health_label(comp_score, len(escalated), len(waiting_ceo))
+    alerts = _alerts_block(comp_score, escalated, waiting_ceo)
+
+    adopted_ids = [d["doc_id"] for d in adopted]
+    impl_docs = list(dict.fromkeys(r["doc_id"] for r in runs_impl))
+    prop_docs = list(dict.fromkeys(r["doc_id"] for r in runs_prop))
+    esc_die_docs = list(dict.fromkeys(r["doc_id"] for r in runs_esc))
+
+    # Build prioritized, deduplicated action list (max 5)
+    raw_actions: list[dict] = []
+    for w in waiting_ceo:
+        raw_actions.append({
+            "key": w["id"],
+            "text": f"Approuver {w['id']}",
+            "why": f"{w.get('title', '')[:55]}\nDécision D3 requise — bloque l'exécution.",
+            "cmd": f"A {w['id']}",
+        })
+    for doc in prop_docs:
+        raw_actions.append({
+            "key": doc,
+            "text": f"Adopter {doc}",
+            "why": "Document validé et conforme. Améliore la readiness FootballIQ.",
+            "cmd": f"adopte {doc}",
+        })
+    if comp["gaps"]:
+        gap_codes = ", ".join(g["code"] for g in comp["gaps"][:3])
+        raw_actions.append({
+            "key": "conformite",
+            "text": "Résoudre les gaps de conformité",
+            "why": f"Gaps : {gap_codes}\nObjectif : passer de {comp_score}% à 95%.",
+        })
+    actions = _top_actions(raw_actions)
+
+    SEP = "\n───────────────────"
     lines = [
-        f"Organisation AI — État {_today()}",
-        "",
-        f"Documents adoptés : {len(adopted)}",
+        f"Résumé exécutif — {_today()}",
+        f"\nOrganisation : {health}",
+        f"\n{alerts}",
+        SEP,
+        "\nDocuments",
+        f"\nAdoptés ({len(adopted_ids)}) : {', '.join(adopted_ids[:8]) or 'Aucun'}",
     ]
-    if adopted:
-        lines.append(f"  {', '.join(d['doc_id'] for d in adopted[:8])}")
+    if impl_docs:
+        lines += ["\nÀ corriger :", _doc_list(impl_docs)]
+    if prop_docs:
+        lines += ["\nPrêts à adopter :", _doc_list(prop_docs)]
+    if esc_die_docs:
+        lines += ["\nEscaladés :", _doc_list(esc_die_docs)]
+
     lines += [
-        f"Conformité globale : {comp['overall_score']}%",
-        f"Gaps ouverts : {len(comp['gaps'])}",
-        "",
-        "Work Packages :",
-        f"  En attente : {wp_counts.get('PENDING', 0) + wp_counts.get('CLAIMED', 0)}",
-        f"  En cours : {wp_counts.get('RUNNING', 0)}",
-        f"  Décision CEO : {wp_counts.get('WAITING_CEO', 0)}",
-        "",
-        "Document Improvement Engine :",
-        f"  À corriger : {len(runs_impl)}",
-        f"  Prêts à adopter : {len(runs_prop)}",
-        f"  Escaladés : {len(runs_esc)}",
+        SEP,
+        f"\nConformité : {comp_score}% — {len(comp['gaps'])} gap(s) ouvert(s)",
+        SEP,
+        f"\nWork Packages",
+        f"En attente : {wp_pending}  |  En cours : {wp_running}  |  Décision CEO : {len(waiting_ceo)}",
     ]
-    if runs_prop:
-        docs = [r["doc_id"] for r in runs_prop[:5]]
-        lines += ["", f"Action CEO : adopter {', '.join(docs)}"]
+
+    if actions:
+        lines.append(SEP)
+        lines.append("\nLa priorité aujourd'hui :")
+        for i, a in enumerate(actions, 1):
+            lines.append(f"\n{i}. {a['text']}")
+            if a.get("why"):
+                lines.append(f"   Pourquoi : {a['why']}")
+            if a.get("cmd"):
+                lines.append(f"   Commande : {a['cmd']}")
+
     return "\n".join(lines)
 
 
@@ -189,7 +287,7 @@ async def _wf_org_blockers() -> str:
         return f"Erreur lecture conformité : {e}"
 
     try:
-        waiting_rows = (db.table("work_packages").select("id,title")
+        waiting_rows = (db.table("work_packages").select("id,title,priority")
                         .eq("status", "WAITING_CEO").limit(5).execute())
         waiting = waiting_rows.data or []
     except Exception:
@@ -199,38 +297,78 @@ async def _wf_org_blockers() -> str:
         esc_rows = (db.table("doc_validations").select("document_id")
                     .eq("status", "ESCALATED")
                     .order("validated_at", desc=True).limit(5).execute())
-        escalated = [r["document_id"] for r in (esc_rows.data or [])]
+        escalated = list(dict.fromkeys(r["document_id"] for r in (esc_rows.data or [])))
     except Exception:
         escalated = []
 
     impl_runs = die.list_runs_by_status("IMPLEMENTATION")
     adopted = adoption_svc.list_adopted()
 
-    blockers: list[str] = []
+    comp_score = comp["overall_score"]
+    health = _health_label(comp_score, len(escalated), len(waiting))
+    alerts = _alerts_block(comp_score, escalated, waiting)
+    impl_docs = list(dict.fromkeys(r["doc_id"] for r in impl_runs))
+
+    adopted_g = [d for d in adopted if d["doc_id"].startswith("G-")]
+    non_adopted_count = max(0, 11 - len(adopted_g))
+
+    SEP = "\n───────────────────"
+    lines = [
+        f"Résumé exécutif — {_today()}",
+        f"\nOrganisation : {health}",
+        f"\n{alerts}",
+    ]
+
+    if not comp["gaps"] and not waiting and not escalated and not impl_runs and non_adopted_count == 0:
+        lines += [SEP, "\n✓ Aucun blocage organisationnel identifié.",
+                  f"Documents adoptés : {len(adopted)} — Conformité : {comp_score}%"]
+        return "\n".join(lines)
+
+    lines.append(SEP)
+    rank = 1
+
     if comp["gaps"]:
-        descs = "; ".join(f"{g['code']}" for g in comp["gaps"][:3])
-        blockers.append(f"Conformité {comp['overall_score']}% — gaps: {descs}")
-    for w in waiting[:3]:
-        blockers.append(f"Décision CEO attendue: {w['id']} — {w['title'][:50]}")
-    for doc_id in escalated[:3]:
-        blockers.append(f"Validation ESCALATED: {doc_id}")
-    if impl_runs:
-        docs = [r["doc_id"] for r in impl_runs[:5]]
-        blockers.append(f"Documents en correction: {', '.join(docs)}")
-    non_adopted = 11 - len([d for d in adopted if d["doc_id"].startswith("G-")])
-    if non_adopted > 0:
-        blockers.append(f"Documents gouvernance non adoptés: {non_adopted}")
+        gap_codes = ", ".join(g["code"] for g in comp["gaps"][:4])
+        lines.append(f"\n{rank}. Conformité insuffisante ({comp_score}%)")
+        lines.append(f"   Gaps : {gap_codes}")
+        lines.append(f"   → Objectif : atteindre 95%")
+        rank += 1
 
-    if not blockers:
-        return (
-            "Aucun blocage organisationnel identifié.\n"
-            f"Documents adoptés: {len(adopted)}\n"
-            f"Conformité: {comp['overall_score']}%"
-        )
+    if waiting:
+        for w in waiting[:2]:
+            lines.append(f"\n{rank}. Décision CEO attendue : {w['id']}")
+            lines.append(f"   {w.get('title','')[:60]}")
+            lines.append(f"   Commande : A {w['id']}")
+            rank += 1
 
-    lines = [f"Blocages organisationnels — {_today()}"]
-    for i, b in enumerate(blockers, 1):
-        lines.append(f"\n{i}. {b}")
+    if escalated:
+        lines.append(f"\n{rank}. Validation(s) ESCALATED :")
+        lines.append(_doc_list(escalated))
+        lines.append("   → Intervention requise : 'améliore <doc>'")
+        rank += 1
+
+    if impl_docs:
+        lines.append(f"\n{rank}. Documents en correction :")
+        lines.append(_doc_list(impl_docs))
+        rank += 1
+
+    if non_adopted_count:
+        lines.append(f"\n{rank}. {non_adopted_count} document(s) gouvernance non adoptés")
+        non_adopted_ids = [f"G-{str(i).zfill(2)}" for i in range(1, 12)
+                           if f"G-{str(i).zfill(2)}" not in [d["doc_id"] for d in adopted_g]]
+        lines.append(_doc_list(non_adopted_ids[:5]))
+
+    # Next step recommendation
+    lines.append(SEP)
+    if waiting:
+        lines.append(f"\nLa prochaine étape est d'approuver {waiting[0]['id']} (D3 bloquant).")
+    elif prop_docs := list(dict.fromkeys(r["doc_id"] for r in die.list_runs_by_status("ADOPTION_PROPOSAL"))):
+        lines.append(f"\nJe recommande d'adopter {prop_docs[0]} en premier — document prêt.")
+    elif comp["gaps"]:
+        lines.append(f"\nLe principal blocage est la conformité ({comp_score}%).")
+    elif escalated:
+        lines.append(f"\nLa priorité est de débloquer la validation de {escalated[0]}.")
+
     return "\n".join(lines)
 
 
@@ -241,34 +379,79 @@ async def _wf_footballiq() -> str:
         return f"Erreur analyse readiness : {e}"
 
     readiness = plan["readiness"]
-    if readiness >= 80:
-        rec = "PRÊT — lancement possible"
-    elif readiness >= 50:
-        rec = "PARTIEL — blocages à lever"
-    else:
-        rec = "NOT READY — travail significatif requis"
+    comp_score = plan["compliance_score"]
+    missing = plan["missing_documents"]
+    adopted_docs = plan["adopted_documents"]
 
+    if readiness >= 80:
+        verdict = "PRÊT — lancement possible"
+        health = "Stable"
+    elif readiness >= 50:
+        verdict = "PARTIEL — blocages à lever"
+        health = "Attention"
+    else:
+        verdict = "NOT READY — travail significatif requis"
+        health = "Critique"
+
+    # Impact projection: each doc adoption ≈ readiness gain
+    if missing:
+        doc_weight = round(60 / len(plan["required_documents"]))
+        projected = min(100, readiness + len(missing) * doc_weight)
+        impact_line = f"Readiness FootballIQ : {readiness}% → ~{projected}% (si tous docs adoptés)"
+    else:
+        impact_line = f"Readiness FootballIQ : {readiness}% — tous documents adoptés"
+
+    SEP = "\n───────────────────"
     lines = [
-        f"FootballIQ Readiness : {readiness}%",
-        f"Recommandation : {rec}",
-        "",
+        f"Résumé exécutif — {_today()}",
+        f"\nOrganisation : {health}",
+        f"\n{'⚠ ' if readiness < 80 else '✓ '}FootballIQ : {verdict}",
+        SEP,
+        f"\nReadiness : {readiness}%",
         f"Documents requis : {len(plan['required_documents'])}",
-        f"  Adoptés : {len(plan['adopted_documents'])}",
-        f"  Manquants : {len(plan['missing_documents'])}",
-        f"Conformité : {plan['compliance_score']}%",
+        f"  Adoptés ({len(adopted_docs)}) : {', '.join(adopted_docs[:6]) or 'Aucun'}",
     ]
-    if plan["missing_documents"]:
-        lines.append(f"\nDocuments à adopter :\n  {', '.join(plan['missing_documents'][:8])}")
+
+    if missing:
+        lines += [f"\nManquants :", _doc_list(missing)]
+
     if plan["blockers"]:
-        lines.append("\nBlockers :")
+        lines.append(f"\nBlockeurs :")
         for b in plan["blockers"][:4]:
             lines.append(f"• {b}")
-    if plan["proposed_work_packages"]:
-        lines.append("\nActions proposées :")
-        for wp in plan["proposed_work_packages"][:4]:
-            lines.append(f"{wp['order']}. {wp['title']}")
+
+    lines += [SEP, f"\nImpact attendu :", f"{impact_line}"]
+
     if plan["requires_ceo_approval"]:
-        lines.append("\nNote : décision D3 CEO requise avant lancement.")
+        lines.append("\n⚠ Décision D3 CEO requise avant tout lancement.")
+
+    # Prioritized actions (max 5, deduped)
+    raw_actions: list[dict] = []
+    for doc in missing[:5]:
+        raw_actions.append({
+            "key": doc,
+            "text": f"Adopter {doc}",
+            "why": f"Document requis pour FootballIQ — bloque la readiness.",
+            "cmd": f"adopte {doc}",
+        })
+    for wp in plan.get("proposed_work_packages", [])[:3]:
+        raw_actions.append({
+            "key": wp["title"],
+            "text": wp["title"],
+            "why": "",
+        })
+    actions = _top_actions(raw_actions)
+
+    if actions:
+        lines.append(SEP)
+        lines.append("\nJe recommande :")
+        for i, a in enumerate(actions, 1):
+            lines.append(f"\n{i}. {a['text']}")
+            if a.get("why"):
+                lines.append(f"   Pourquoi : {a['why']}")
+            if a.get("cmd"):
+                lines.append(f"   Commande : {a['cmd']}")
+
     return "\n".join(lines)
 
 
@@ -296,36 +479,75 @@ async def _wf_doc_status(doc_ids: list[str]) -> str:
     comp = compliance_engine.check_document_compliance(doc_id)
     score = 100 if comp.get("status") == "UNKNOWN" else comp.get("score", 0)
 
-    lines = [f"Statut {doc_id}"]
-    lines.append(f"\nValidation : {val['status'] if val else 'AUCUNE'}")
+    val_status = val["status"] if val else "AUCUNE"
+    adop_status = adoption.get("status") if adoption else "NON DEMANDÉE"
+
+    # Determine doc health
+    if adop_status == "ADOPTED":
+        health = "Stable"
+        alert = "✓ Document adopté et actif."
+    elif val_status == "ESCALATED":
+        health = "Critique"
+        alert = f"⚠ Validation ESCALATED — intervention requise."
+    elif adop_status == "WAITING_CEO":
+        health = "Attention"
+        alert = "⚠ Décision D3 CEO attendue."
+    elif val_status == "RESOLVED" or (run and run.get("status") == "ADOPTION_PROPOSAL"):
+        health = "Attention"
+        alert = "⚠ Prêt à adopter — action CEO requise."
+    else:
+        health = "Attention"
+        alert = "⚠ Document non encore adopté."
+
+    SEP = "\n───────────────────"
+    lines = [
+        f"Résumé exécutif — {doc_id}",
+        f"\nDocument : {health}",
+        f"\n{alert}",
+        SEP,
+        f"\nValidation : {val_status}",
+    ]
     if val and val.get("validated_at"):
         lines.append(f"  Dernière : {val['validated_at'][:10]}")
 
-    adop_status = adoption.get("status") if adoption else "NON DEMANDÉE"
     lines.append(f"\nAdoption : {adop_status}")
     if adoption and adoption.get("adopted_at"):
         lines.append(f"  Date : {adoption['adopted_at'][:10]}")
 
-    lines.append(f"\nConformité : {score}% ({comp.get('status', '?')})")
+    lines.append(f"\nConformité : {score}%")
+    if comp.get("gaps"):
+        for g in comp["gaps"][:3]:
+            lines.append(f"  [{g.get('severity','?')}] {g.get('description','')[:50]}")
 
     if run:
         lines.append(f"\nDIE : {run.get('status', '?')} (cycle {run.get('iteration', 0)}/3)")
         if run.get("escalation_reason"):
             lines.append(f"  Cause : {run['escalation_reason'][:80]}")
 
-    # Actionable suggestion
+    lines.append(SEP)
+
+    # Recommendation with reason
     if adop_status == "ADOPTED":
-        lines.append("\n→ Document adopté. Aucune action requise.")
+        lines.append("\nAucune action requise.")
     elif adop_status == "WAITING_CEO":
-        lines.append("\n→ Approbation CEO requise (D3).")
+        lines.append("\nJe recommande d'approuver ce document.")
+        lines.append("Pourquoi : décision D3 bloquante — l'organisation attend votre validation.")
     elif run and run.get("status") == "ADOPTION_PROPOSAL":
-        lines.append(f"\n→ Prêt à adopter. Répondez : 'adopte {doc_id}'")
-    elif val and val.get("status") == "RESOLVED":
-        lines.append(f"\n→ Validé. Répondez : 'adopte {doc_id}'")
-    elif val and val.get("status") == "ESCALATED":
-        lines.append(f"\n→ Validation en escalade. Répondez : 'améliore {doc_id}'")
+        lines.append(f"\nJe recommande d'adopter {doc_id}.")
+        lines.append("Pourquoi : document validé et conforme — prêt à entrer en vigueur.")
+        lines.append(f"Commande : adopte {doc_id}")
+    elif val_status == "RESOLVED":
+        lines.append(f"\nJe recommande d'adopter {doc_id}.")
+        lines.append("Pourquoi : validation RESOLVED — aucun blocage restant.")
+        lines.append(f"Commande : adopte {doc_id}")
+    elif val_status == "ESCALATED":
+        lines.append(f"\nLa prochaine étape est de relancer l'amélioration de {doc_id}.")
+        lines.append("Pourquoi : validation escaladée — correction requise avant adoption.")
+        lines.append(f"Commande : améliore {doc_id}")
     else:
-        lines.append(f"\n→ Non validé. Répondez : 'valide {doc_id}'")
+        lines.append(f"\nLa prochaine étape est de valider {doc_id}.")
+        lines.append("Pourquoi : aucune validation existante — étape préalable obligatoire.")
+        lines.append(f"Commande : valide {doc_id}")
 
     return "\n".join(lines)
 
