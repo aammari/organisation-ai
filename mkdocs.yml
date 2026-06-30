@@ -33,7 +33,19 @@ markdown_extensions:
 
 nav:
   - Accueil: index.md
-  - Gouvernance: governance/index.md
+  - Gouvernance:
+    - Index: governance/index.md
+    - G-01 Meeting Protocol: governance/MeetingProtocol-G01-v1_0.md
+    - G-02 Data Retention: governance/DataRetention-G02-v1_0.md
+    - G-03 Agent Onboarding: governance/AgentOnboarding-G03-v1_0.md
+    - G-04 Config Management: governance/ConfigManagement-G04-v1_0.md
+    - G-05 Security Policy: governance/SecurityPolicy-G05-v1_0.md
+    - G-06 Capability Lifecycle: governance/CapabilityLifecycle-G06-v1_0.md
+    - G-07 Glossaire: governance/Glossary-G07-v1_0.md
+    - G-08 Exception Waiver: governance/ExceptionWaiver-G08-v1_0.md
+    - G-09 AI Ethics: governance/AIEthics-G09-v1_0.md
+    - G-10 Org Health Review: governance/OrgHealthReview-G10-v1_0.md
+    - G-11 CEO Communication: governance/CEOCommunicationProtocol-G11-v1_1.md
   - Architecture: architecture/index.md
   - Design Technique: technical-design/index.md
   - Opérations: operations/index.md
