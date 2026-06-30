@@ -591,6 +591,59 @@ async def _run_correction(esc: dict):
     )
 
 
+async def _handle_wp_approval(decision: str, wp_id: str) -> dict:
+    """Approve or reject a work_package by ID. Returns {handled, message}."""
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    try:
+        row = db.table("work_packages").select(
+            "id,title,status,approved,required_decision_level"
+        ).eq("id", wp_id).execute()
+    except Exception as e:
+        return {"handled": False, "message": f"Erreur lecture WP {wp_id} : {e}"}
+
+    if not row.data:
+        # WP not found — list pending CEO WPs
+        try:
+            pending = (db.table("work_packages")
+                       .select("id,title,priority,required_decision_level")
+                       .eq("approved", False).eq("status", "PENDING")
+                       .order("priority").limit(5).execute())
+            pending_list = pending.data or []
+        except Exception:
+            pending_list = []
+
+        lines = [f"Le Work Package {wp_id} est introuvable."]
+        if pending_list:
+            lines.append("\nWPs en attente d'approbation CEO :")
+            for w in pending_list:
+                lines.append(
+                    f"• {w['id']} ({w.get('priority','?')}, {w.get('required_decision_level','?')})"
+                    f" — {w.get('title','')[:50]}"
+                )
+        else:
+            lines.append("Aucun WP en attente d'approbation CEO.")
+        return {"handled": False, "message": "\n".join(lines)}
+
+    wp = row.data[0]
+    title = wp.get("title", "")[:60]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if decision == "A":
+        db.table("work_packages").update({
+            "approved": True,
+            "updated_at": now_iso,
+        }).eq("id", wp_id).execute()
+        await _tg(f"✓ WP approuvé : {wp_id}\n{title}\nExécution programmée par le Chief of Staff.")
+        return {"handled": True, "message": f"WP {wp_id} approuvé — exécution en cours."}
+    else:
+        db.table("work_packages").update({
+            "status": "REJECTED",
+            "updated_at": now_iso,
+        }).eq("id", wp_id).execute()
+        await _tg(f"✗ WP refusé : {wp_id}\n{title}")
+        return {"handled": True, "message": f"WP {wp_id} refusé — archivé."}
+
+
 async def _run_escalation_respond(response: str, target_doc_id: str | None, background_tasks: BackgroundTasks) -> dict:
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     pending = (
@@ -660,13 +713,19 @@ async def route_message(
 
     if route == "escalation":
         parts = message.split()
-        response = parts[0].upper()
-        doc_id = parts[1].upper() if len(parts) > 1 else None
-        result = await _run_escalation_respond(response, doc_id, background_tasks)
+        decision = parts[0].upper()  # "A" or "B"
+        target = parts[1].upper() if len(parts) > 1 else None
+
+        # "A WP-xxx" → work_package approval (not a doc validation escalation)
+        if target and target.startswith("WP-"):
+            result = await _handle_wp_approval(decision, target)
+        else:
+            result = await _run_escalation_respond(decision, target, background_tasks)
+
         reply = (
-            f"Escalade résolue — {result['doc_id']}"
-            if result.get("handled")
-            else result.get("message", "Aucune escalade en attente")
+            result.get("message", "Traité.")
+            if result.get("handled") is False
+            else result.get("message", f"✓ {target or '?'} — {decision}")
         )
         return {"response": reply, "route": route, "action_id": action_id}
 
