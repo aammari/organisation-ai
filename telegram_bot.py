@@ -332,6 +332,79 @@ async def _handle_goal(update: Update, goal: str):
         await update.message.reply_text(f"Erreur analyse objectif: {e}")
 
 
+async def _handle_improve(update: Update, doc_id: str):
+    await update.message.reply_text(f"DIE — {doc_id} : lancement cycle amélioration...")
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(f"{BACKEND_URL}/improve/doc", json={"doc_id": doc_id})
+            r.raise_for_status()
+            result = r.json()
+        await update.message.reply_text(
+            f"DIE — {doc_id}\n"
+            f"Run : {result.get('run_id')}\n"
+            f"Statut : {result.get('status')}\n"
+            "Validation en arrière-plan. CEO notifié à chaque étape."
+        )
+    except Exception as e:
+        logger.error(f"improve {doc_id}: {e}")
+        await update.message.reply_text(f"Erreur DIE {doc_id}: {e}")
+
+
+async def _handle_docs_ready(update: Update):
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(f"{BACKEND_URL}/improve/list?status=ADOPTION_PROPOSAL")
+            r.raise_for_status()
+        runs = r.json().get("runs", [])
+        if not runs:
+            await update.message.reply_text("Aucun document en attente d'adoption.")
+            return
+        lines = "\n".join(f"• {run['doc_id']} (run: {run['id']}) — conformité {run.get('compliance_score','?')}%" for run in runs[:5])
+        await update.message.reply_text(f"Documents prêts pour adoption :\n{lines}")
+    except Exception as e:
+        await update.message.reply_text(f"Erreur: {e}")
+
+
+async def _handle_docs_to_fix(update: Update):
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(f"{BACKEND_URL}/improve/list?status=IMPLEMENTATION")
+            r.raise_for_status()
+        runs = r.json().get("runs", [])
+        if not runs:
+            await update.message.reply_text("Aucun document en attente de correction.")
+            return
+        lines = "\n".join(f"• {run['doc_id']} — itération {run.get('iteration','?')}/3" for run in runs[:5])
+        await update.message.reply_text(f"Documents à corriger :\n{lines}")
+    except Exception as e:
+        await update.message.reply_text(f"Erreur: {e}")
+
+
+async def _handle_org_health(update: Update):
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            comp = await c.get(f"{BACKEND_URL}/compliance/status")
+            adop = await c.get(f"{BACKEND_URL}/adoption/registry")
+            runs = await c.get(f"{BACKEND_URL}/improve/list")
+        comp_data = comp.json()
+        adopted = adop.json().get("adopted", [])
+        all_runs = runs.json().get("runs", [])
+        by_status: dict[str, int] = {}
+        for run in all_runs:
+            s = run.get("status", "?")
+            by_status[s] = by_status.get(s, 0) + 1
+        await update.message.reply_text(
+            f"Organisation Health\n\n"
+            f"Docs adoptés: {len(adopted)}\n"
+            f"Conformité: {comp_data.get('overall_score', 0)}%\n"
+            f"Gaps ouverts: {len(comp_data.get('gaps', []))}\n\n"
+            f"DIE runs:\n"
+            + "\n".join(f"• {s}: {n}" for s, n in sorted(by_status.items()))
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Erreur org health: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
     message = update.message.text.strip()
@@ -400,6 +473,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if re.match(r"(prépare|prepare|planifie|objectif)\s+", msg_lower):
         goal = re.sub(r"^(prépare|prepare|planifie|objectif)\s+", "", message.strip(), flags=re.IGNORECASE)
         await _handle_goal(update, goal)
+        return
+
+    # "améliore X" / "ameliore X" → improvement engine
+    if re.match(r"am[eé]liore?\s+", msg_lower):
+        m = re.search(r"([a-z])-(\d+)", msg_lower)
+        if m:
+            await _handle_improve(update, f"{m.group(1).upper()}-{m.group(2).zfill(2)}")
+            return
+
+    # "validation X" (sans s) → validation single doc
+    if re.match(r"validation\s+", msg_lower):
+        m = re.search(r"([a-z])-(\d+)", msg_lower)
+        if m:
+            await _handle_validate_single(update, f"{m.group(1).upper()}-{m.group(2).zfill(2)}")
+            return
+
+    # Dashboard / list commands
+    if msg_lower.strip() in ("documents prêts", "documents prets", "adoptions proposées", "adoptions proposees"):
+        await _handle_docs_ready(update)
+        return
+    if msg_lower.strip() in ("documents à corriger", "documents a corriger"):
+        await _handle_docs_to_fix(update)
+        return
+    if msg_lower.strip() in ("organisation health", "org health", "health"):
+        await _handle_org_health(update)
         return
 
     # PRIORITÉ 3 — Tout le reste via /route (Chief of Staff unifié)
