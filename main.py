@@ -488,11 +488,11 @@ async def thread_start(body: ThreadStartIn):
     )
 
 
-async def _validate_single_doc(doc_id: str, content: str) -> dict:
+async def _validate_single_doc(doc_id: str, content: str, doc_meta: dict | None = None) -> dict:
     db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     thread = await _run_thread(
         title=f"Validation {doc_id}",
-        wp_id="WP-Sprint2-001",
+        wp_id=ACTIVE_WP_ID,
         subject=(
             f"Valide le document {doc_id}.\n"
             "Analyse chaque section. Note les points forts et les remarques.\n\n"
@@ -516,8 +516,21 @@ async def _validate_single_doc(doc_id: str, content: str) -> dict:
         "status": thread["status"],
         "remarks": remarks,
         "validated_at": datetime.now(timezone.utc).isoformat(),
+        # Canonical source metadata (populated when content fetched from GitHub)
+        "version": doc_meta.get("version") if doc_meta else None,
+        "commit_sha": doc_meta.get("commit_sha") if doc_meta else None,
+        "doc_sha": doc_meta.get("doc_sha") if doc_meta else None,
+        "validator": "chief-analyst",
     }).execute()
-    result = {"doc_id": doc_id, "thread_id": thread["thread_id"], "status": thread["status"], "remarks": remarks}
+    result = {
+        "doc_id": doc_id,
+        "thread_id": thread["thread_id"],
+        "status": thread["status"],
+        "remarks": remarks,
+        "doc_sha": doc_meta.get("doc_sha") if doc_meta else None,
+        "commit_sha": doc_meta.get("commit_sha") if doc_meta else None,
+        "version": doc_meta.get("version") if doc_meta else None,
+    }
 
     if thread["status"] == "ESCALATED":
         await _handle_escalation(doc_id, thread["thread_id"], remarks)
@@ -699,11 +712,57 @@ async def escalation_pending():
 
 @app.post("/validate/doc")
 async def validate_doc(request: dict):
+    from core.doc_source import fetch_doc
     doc_id = request.get("doc_id", "")
-    content = request.get("content", "")
-    if not doc_id or not content:
-        raise HTTPException(status_code=422, detail="doc_id and content are required")
-    return await _validate_single_doc(doc_id, content)
+    content = request.get("content", "")  # optional — if absent, fetched from GitHub
+    if not doc_id:
+        raise HTTPException(status_code=422, detail="doc_id is required")
+
+    doc_meta: dict | None = None
+
+    if not content:
+        # PARTIE D — fetch from canonical GitHub source
+        fetched = await fetch_doc(doc_id)
+        if fetched["status"] != "OK":
+            return fetched  # MISSING_DOCUMENTS | UPLOAD_FAILED | UNKNOWN_DOC
+        content = fetched["content"]
+        doc_meta = fetched
+
+        # PARTIE F — SHA deduplication
+        db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        last = (
+            db.table("doc_validations")
+            .select("doc_sha")
+            .eq("document_id", doc_id)
+            .not_.is_("doc_sha", "null")
+            .order("validated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if last.data and last.data[0].get("doc_sha") == fetched["doc_sha"]:
+            return {
+                "status": "ALREADY_VALIDATED",
+                "doc_id": doc_id,
+                "doc_sha": fetched["doc_sha"],
+                "message": "Document inchangé depuis la dernière validation.",
+            }
+
+    return await _validate_single_doc(doc_id, content, doc_meta)
+
+
+@app.get("/validate/preflight")
+async def validate_preflight(doc_ids: str = "", family: str = ""):
+    """Check document presence on GitHub before launching a batch."""
+    from core.doc_source import batch_preflight, FAMILIES, DOC_PATHS
+    if family:
+        ids = FAMILIES.get(family.upper(), [])
+        if not ids:
+            raise HTTPException(status_code=422, detail=f"Unknown family: {family}")
+    elif doc_ids:
+        ids = [d.strip().upper() for d in doc_ids.split(",") if d.strip()]
+    else:
+        ids = list(DOC_PATHS.keys())
+    return await batch_preflight(ids)
 
 
 @app.get("/validate/status")
@@ -720,11 +779,25 @@ async def validate_status():
 
 
 async def _run_batch_validation(docs: list):
+    from core.doc_source import fetch_doc
     for doc in docs:
         doc_id = doc["id"]
+        content = doc.get("content", "")
+        doc_meta: dict | None = None
+
+        # If no content supplied, fetch from canonical GitHub source
+        if not content:
+            fetched = await fetch_doc(doc_id)
+            if fetched["status"] != "OK":
+                await _tg(f"MISSING — {doc_id} : {fetched.get('status')} ({fetched.get('path','?')})")
+                await asyncio.sleep(5)
+                continue
+            content = fetched["content"]
+            doc_meta = fetched
+
         # Isolation totale : une exception sur un doc ne bloque pas les suivants
         try:
-            result = await _validate_single_doc(doc_id, doc["content"])
+            result = await _validate_single_doc(doc_id, content, doc_meta)
         except Exception as e:
             logger.error(f"batch validate {doc_id}: {e}")
             result = {"status": "ERROR", "error": str(e), "remarks": [], "thread_id": ""}
@@ -750,12 +823,32 @@ async def _run_batch_validation(docs: list):
 
 @app.post("/validate/batch")
 async def validate_batch(request: dict, background_tasks: BackgroundTasks):
+    from core.doc_source import batch_preflight
     docs = request.get("documents", [])
+    doc_ids = request.get("doc_ids", [])  # alternative: pass only IDs, content fetched from GitHub
+
+    if doc_ids:
+        # PARTIE H — preflight before any batch launch
+        preflight = await batch_preflight(doc_ids)
+        if preflight["status"] == "MISSING_DOCUMENTS":
+            await _tg(
+                f"Batch BLOQUÉ — {len(preflight['missing'])} document(s) absent(s) de GitHub :\n"
+                + "\n".join(f"• {m['doc_id']} ({m.get('path','?')})" for m in preflight["missing"])
+                + "\nPoussez les documents manquants avant de relancer."
+            )
+            return {
+                "status": "MISSING_DOCUMENTS",
+                "missing": preflight["missing"],
+                "ready": preflight["ready"],
+            }
+        docs = [{"id": d} for d in doc_ids]  # content will be fetched in _run_batch_validation
+
     if not docs:
-        raise HTTPException(status_code=422, detail="documents list is required")
+        raise HTTPException(status_code=422, detail="doc_ids or documents required")
+
     background_tasks.add_task(_run_batch_validation, docs)
     await _tg(f"Batch validation démarré — {len(docs)} documents en file.")
-    return {"queued": len(docs), "message": "Validation lancée en arrière-plan. CEO notifié à chaque doc."}
+    return {"queued": len(docs), "status": "QUEUED", "message": "CEO notifié à chaque doc."}
 
 
 @app.get("/observability/work-packages/status")
