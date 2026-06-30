@@ -227,6 +227,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"intervene lookup: {e}")
 
+    # CEO responds A or B to an escalation
+    if message.strip().upper() in ("A", "B"):
+        try:
+            async with httpx.AsyncClient(timeout=300) as c:
+                r = await c.post(
+                    f"{BACKEND_URL}/escalation/respond",
+                    json={"response": message.strip().upper()},
+                )
+                r.raise_for_status()
+                data = r.json()
+            if data.get("handled"):
+                resp = data["response"]
+                doc_id = data["doc_id"]
+                if resp == "A":
+                    await update.message.reply_text(f"Correction {doc_id} v1.1 lancée. Les agents travaillent...")
+                else:
+                    await update.message.reply_text(f"Dérogation CEO enregistrée — {doc_id} validé en l'état.")
+                return
+            # No pending escalation — fall through to normal routing
+        except Exception as e:
+            logger.error(f"escalation_respond: {e}")
+
     # Validation pattern — "valide G-XX" or "valide tous les G"
     msg_lower = message.lower()
     if msg_lower.startswith("valide"):
