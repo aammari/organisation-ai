@@ -542,8 +542,24 @@ async def _validate_single_doc(doc_id: str, content: str) -> dict:
     return result
 
 
+async def _run_correction(esc: dict):
+    doc_id = esc["doc_id"]
+    objections_text = esc.get("objections", "")
+    await _tg(f"Correction lancée pour {doc_id}\nLes agents produisent v1.1...")
+    await _run_thread(
+        title=f"Correction {doc_id} v1.1",
+        wp_id="WP-Sprint2-001",
+        subject=(
+            f"Produis une version corrigée de {doc_id}.\n"
+            f"Points à corriger identifiés lors de la validation précédente :\n"
+            f"{objections_text}\n\n"
+            f"Produis le document corrigé complet."
+        ),
+    )
+
+
 @app.post("/escalation/respond")
-async def escalation_respond(request: dict):
+async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
     response = request.get("response", "").strip().upper()
     if response not in ("A", "B"):
         raise HTTPException(status_code=422, detail="response must be A or B")
@@ -562,28 +578,18 @@ async def escalation_respond(request: dict):
 
     esc = pending.data[0]
     doc_id = esc["doc_id"]
-    objections_text = esc.get("objections", "")
 
-    if response == "A":
-        await _tg(f"Correction lancée pour {doc_id}\nLes agents produisent v1.1...")
-        await _run_thread(
-            title=f"Correction {doc_id} v1.1",
-            wp_id="WP-Sprint2-001",
-            subject=(
-                f"Produis une version corrigée de {doc_id}.\n"
-                f"Points à corriger identifiés lors de la validation précédente :\n"
-                f"{objections_text}\n\n"
-                f"Produis le document corrigé complet."
-            ),
-        )
-    else:
-        db.table("doc_validations").update({"status": "CEO_VALIDATED"}).eq("document_id", doc_id).execute()
-        await _tg(f"Dérogation appliquée — {doc_id}\nValidé en l'état par CEO.")
-
+    # Mark resolved immediately so CEO gets fast response
     db.table("pending_escalations").update({
         "status": "RESOLVED",
         "ceo_response": response,
     }).eq("id", esc["id"]).execute()
+
+    if response == "A":
+        background_tasks.add_task(_run_correction, esc)
+    else:
+        db.table("doc_validations").update({"status": "CEO_VALIDATED"}).eq("document_id", doc_id).execute()
+        await _tg(f"Dérogation appliquée — {doc_id}\nValidé en l'état par CEO.")
 
     return {"handled": True, "doc_id": doc_id, "response": response}
 
