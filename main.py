@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
@@ -22,7 +23,9 @@ from config import (
 from core.langgraph_app import workflow_app, get_model_for_task
 from core.cost_tracker import CostTracker
 from core.context_sync import OrgContextSync
-from core.chief_of_staff import cos
+from core.chief_of_staff import cos, ACTIVE_WP_ID
+
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
 logger = logging.getLogger(__name__)
 
@@ -621,7 +624,13 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
 
 
 @app.post("/route")
-async def route_message(request: dict, background_tasks: BackgroundTasks):
+async def route_message(
+    request: dict,
+    background_tasks: BackgroundTasks,
+    x_internal_token: str = Header(default=""),
+):
+    if INTERNAL_TOKEN and x_internal_token != INTERNAL_TOKEN:
+        raise HTTPException(status_code=403, detail="Unauthorized")
     message = request.get("message", "").strip()
     if not message:
         raise HTTPException(status_code=422, detail="message is required")
@@ -645,7 +654,7 @@ async def route_message(request: dict, background_tasks: BackgroundTasks):
     if route == "thread":
         thread = await _run_thread(
             title=message[:100],
-            wp_id="WP-Sprint2-001",
+            wp_id=ACTIVE_WP_ID,
             subject=message,
         )
         return {
@@ -747,6 +756,129 @@ async def validate_batch(request: dict, background_tasks: BackgroundTasks):
     background_tasks.add_task(_run_batch_validation, docs)
     await _tg(f"Batch validation démarré — {len(docs)} documents en file.")
     return {"queued": len(docs), "message": "Validation lancée en arrière-plan. CEO notifié à chaque doc."}
+
+
+@app.get("/observability/work-packages/status")
+async def obs_wp_status():
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    rows = db.table("work_packages").select("status").execute().data or []
+    counts: dict[str, int] = {}
+    for row in rows:
+        s = row.get("status", "UNKNOWN")
+        counts[s] = counts.get(s, 0) + 1
+    all_statuses = ["PENDING", "CLAIMED", "RUNNING", "DONE", "FAILED", "WAITING_CEO", "BLOCKED", "ERROR"]
+    return {s: counts.get(s, 0) for s in all_statuses}
+
+
+@app.get("/observability/actions/recent")
+async def obs_actions_recent(limit: int = 20, state: str = "", source: str = ""):
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    q = db.table("action_ledger").select("id,source,type,state,created_at,updated_at")
+    if state:
+        q = q.eq("state", state)
+    if source:
+        q = q.eq("source", source)
+    rows = q.order("created_at", desc=True).limit(min(limit, 100)).execute().data or []
+    # Never expose raw_message to avoid leaking CEO inputs
+    return {"actions": rows, "count": len(rows)}
+
+
+@app.get("/observability/errors")
+async def obs_errors():
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    failed_wps = (
+        db.table("work_packages")
+        .select("id,title,status,updated_at")
+        .in_("status", ["FAILED", "ERROR"])
+        .order("updated_at", desc=True)
+        .limit(20)
+        .execute()
+        .data or []
+    )
+    failed_actions = (
+        db.table("action_ledger")
+        .select("id,source,type,state,updated_at")
+        .eq("state", "FAILED")
+        .order("updated_at", desc=True)
+        .limit(20)
+        .execute()
+        .data or []
+    )
+    last_error = None
+    all_errors = [
+        *[{"origin": "work_package", **wp} for wp in failed_wps],
+        *[{"origin": "action", **a} for a in failed_actions],
+    ]
+    if all_errors:
+        all_errors.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        last_error = all_errors[0]
+    return {
+        "failed_work_packages": failed_wps,
+        "failed_actions": failed_actions,
+        "last_error": last_error,
+    }
+
+
+@app.get("/observability/metrics")
+async def obs_metrics(source: str = ""):
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    today = date.today().isoformat()
+
+    # WP counts
+    wp_rows = db.table("work_packages").select("status,claimed_at,updated_at").execute().data or []
+    wp_by_status: dict[str, int] = {}
+    for row in wp_rows:
+        s = row.get("status", "UNKNOWN")
+        wp_by_status[s] = wp_by_status.get(s, 0) + 1
+
+    # Average processing time (DONE WPs with claimed_at set)
+    times = []
+    for row in wp_rows:
+        if row.get("status") == "DONE" and row.get("claimed_at") and row.get("updated_at"):
+            try:
+                t0 = datetime.fromisoformat(str(row["claimed_at"]).replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00"))
+                diff = (t1 - t0).total_seconds()
+                if 0 < diff < 7200:
+                    times.append(diff)
+            except Exception:
+                pass
+    avg_time = round(statistics.mean(times)) if times else 0
+
+    # Actions today
+    action_rows = (
+        db.table("action_ledger")
+        .select("id")
+        .gte("created_at", f"{today}T00:00:00+00:00")
+        .execute()
+        .data or []
+    )
+
+    # Audit log if called from Telegram
+    if source == "telegram":
+        try:
+            db.table("action_ledger").insert({
+                "id": f"ACT-{uuid.uuid4().hex[:8]}",
+                "source": "telegram",
+                "raw_message": "/status observability query",
+                "type": "observability_status",
+                "state": "DONE",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception:
+            pass
+
+    return {
+        "total_actions_today": len(action_rows),
+        "total_work_packages_done": wp_by_status.get("DONE", 0),
+        "total_work_packages_failed": wp_by_status.get("FAILED", 0) + wp_by_status.get("ERROR", 0),
+        "pending_count": wp_by_status.get("PENDING", 0),
+        "waiting_ceo_count": wp_by_status.get("WAITING_CEO", 0),
+        "average_processing_time_seconds": avg_time,
+        "last_backlog_run_at": cos._last_backlog_run_at,
+        "wp_by_status": wp_by_status,
+    }
 
 
 @app.get("/thread/{thread_id}")
