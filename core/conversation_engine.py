@@ -330,7 +330,47 @@ async def _wf_doc_status(doc_ids: list[str]) -> str:
     return "\n".join(lines)
 
 
-async def _wf_doc_audit(doc_ids: list[str], action_id: str) -> str:
+async def _notify_wp_approval_required(
+    wp_id: str,
+    title: str,
+    priority: str,
+    level: str,
+    purpose: str,
+    tg_notify,
+    db,
+    action_id: str = "",
+) -> None:
+    """Notify CEO via Telegram when a WP requires approval. Logs NOTIFICATION_FAILED on error."""
+    msg = (
+        f"WP créé — approbation requise\n\n"
+        f"ID :\n{wp_id}\n\n"
+        f"Titre :\n{title}\n\n"
+        f"Priorité :\n{priority}\n\n"
+        f"Niveau :\n{level}\n\n"
+        f"Objectif :\n{purpose}\n\n"
+        f"Action CEO :\nRépondez :\nA {wp_id}"
+    )
+    if not tg_notify:
+        return
+    try:
+        await tg_notify(msg)
+    except Exception as e:
+        logger.error(f"notify_wp {wp_id}: {e}")
+        try:
+            db.table("action_ledger").insert({
+                "id": f"ACT-{uuid.uuid4().hex[:8]}",
+                "source": "system",
+                "raw_message": f"NOTIFICATION_FAILED: WP {wp_id} — {str(e)[:200]}",
+                "state": "NOTIFICATION_FAILED",
+                "type": "wp_notification_failed",
+                "created_at": _now(),
+                "updated_at": _now(),
+            }).execute()
+        except Exception as e2:
+            logger.error(f"notify_wp action_ledger: {e2}")
+
+
+async def _wf_doc_audit(doc_ids: list[str], action_id: str, tg_notify=None) -> str:
     db = get_supabase()
     wp_id = f"WP-AUDIT-{uuid.uuid4().hex[:6].upper()}"
     scope = " ".join(doc_ids) if doc_ids else "tous documents adoptés"
@@ -355,13 +395,24 @@ async def _wf_doc_audit(doc_ids: list[str], action_id: str) -> str:
         logger.error(f"_wf_doc_audit WP insert: {e}")
         return f"Erreur création WP audit : {e}"
 
+    await _notify_wp_approval_required(
+        wp_id=wp_id,
+        title=title,
+        priority="P1",
+        level="D2",
+        purpose="Comparer l'organisation réelle avec les documents officiels.",
+        tg_notify=tg_notify,
+        db=db,
+        action_id=action_id,
+    )
+
     return (
         f"Audit organisationnel lancé.\n\n"
         f"Scope : {scope}\n"
         f"WP créé : {wp_id}\n\n"
         f"Cette analyse nécessite un traitement approfondi.\n"
         f"Approuvez avec : 'A {wp_id}'\n"
-        f"Je vous notifie dès les résultats disponibles."
+        f"Notification Telegram envoyée."
     )
 
 
@@ -583,7 +634,7 @@ class ConversationEngine:
             elif intent == "DOCUMENT_STATUS":
                 response = await _wf_doc_status(doc_ids)
             elif intent == "DOCUMENT_AUDIT":
-                response = await _wf_doc_audit(doc_ids, action_id)
+                response = await _wf_doc_audit(doc_ids, action_id, tg_notify)
             elif intent == "VALIDATION_REQUEST":
                 response = await _wf_validation(doc_ids)
             elif intent == "ADOPTION_REQUEST":
