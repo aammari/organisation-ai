@@ -515,31 +515,40 @@ async def _validate_single_doc(doc_id: str, content: str) -> dict:
     result = {"doc_id": doc_id, "thread_id": thread["thread_id"], "status": thread["status"], "remarks": remarks}
 
     if thread["status"] == "ESCALATED":
-        objections = [r for r in remarks if r["decision"] == "OBJECTION"]
-        points = "\n".join(
-            f"• Tour {r['tour']} : {r['content'][:150]}..."
-            for r in objections
-        )
-        objections_text = points or f"Voir thread {thread['thread_id']}"
-        # Persist escalation for CEO response tracking
-        esc_id = f"ESC-{doc_id}-{thread['thread_id']}"
+        await _handle_escalation(doc_id, thread["thread_id"], remarks)
+
+    return result
+
+
+async def _handle_escalation(doc_id: str, thread_id: str, remarks: list) -> str:
+    """Insert pending_escalations + notify CEO. Returns objections_text."""
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    objections = [r for r in remarks if r.get("decision") == "OBJECTION"]
+    points = "\n".join(
+        f"• Tour {r['tour']} : {r['content'][:150]}..."
+        for r in objections
+    )
+    objections_text = points or f"Voir thread {thread_id}"
+    esc_id = f"ESC-{doc_id}-{thread_id}"
+    try:
         db.table("pending_escalations").insert({
             "id": esc_id,
             "doc_id": doc_id,
-            "thread_id": thread["thread_id"],
+            "thread_id": thread_id,
             "status": "WAITING_CEO",
             "objections": objections_text,
         }).execute()
-        await _tg(
-            f"ESCALADE — {doc_id}\n\n"
-            f"Les agents n'ont pas atteint consensus.\n\n"
-            f"Points bloquants :\n{objections_text}\n\n"
-            f"Action requise :\n"
-            f"A — Corriger le document\n"
-            f"B — Valider en l'état (dérogation CEO)"
-        )
-
-    return result
+    except Exception as e:
+        logger.error(f"pending_escalations insert {esc_id}: {e}")
+    await _tg(
+        f"ESCALADE — {doc_id}\n\n"
+        f"Les agents n'ont pas atteint consensus.\n\n"
+        f"Points bloquants :\n{objections_text}\n\n"
+        f"Action requise :\n"
+        f"A — Corriger le document\n"
+        f"B — Valider en l'état (dérogation CEO)"
+    )
+    return objections_text
 
 
 async def _run_correction(esc: dict):
@@ -633,13 +642,28 @@ async def _run_batch_validation(docs: list):
     for doc in docs:
         try:
             result = await _validate_single_doc(doc["id"], doc["content"])
-            # ESCALATED notification already sent inside _validate_single_doc
-            if result["status"] != "ESCALATED":
+            if result["status"] == "ESCALATED":
+                # _validate_single_doc already called _handle_escalation,
+                # but call it again explicitly if the first attempt silently failed
+                pending = (
+                    create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                    .table("pending_escalations")
+                    .select("id")
+                    .eq("doc_id", doc["id"])
+                    .eq("status", "WAITING_CEO")
+                    .execute()
+                )
+                if not pending.data:
+                    await _handle_escalation(
+                        doc["id"], result["thread_id"], result["remarks"]
+                    )
+            else:
                 await _tg(
                     f"Validation {doc['id']} — {result['status']}\n"
                     f"Remarques : {len(result['remarks'])}"
                 )
         except Exception as e:
+            logger.error(f"batch validate {doc['id']}: {e}")
             await _tg(f"Erreur validation {doc['id']} : {str(e)[:200]}")
         await asyncio.sleep(30)
     await _tg(f"Batch validation terminé — {len(docs)} documents traités.")
