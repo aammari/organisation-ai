@@ -156,50 +156,63 @@ _GOV_FILES = {
 
 
 async def _handle_validate_single(update: Update, doc_id: str):
-    filename = _GOV_FILES.get(doc_id)
-    if not filename:
-        await update.message.reply_text(f"Document {doc_id} inconnu.")
-        return
-    path = _DOCS_DIR / filename
-    if not path.exists():
-        await update.message.reply_text(f"Fichier {filename} introuvable.")
-        return
-    content = path.read_text()
-    await update.message.reply_text(f"Validation {doc_id} en cours...")
+    await update.message.reply_text(f"Validation {doc_id} — chargement depuis GitHub...")
     try:
         async with httpx.AsyncClient(timeout=300) as c:
+            # No content — backend fetches from canonical GitHub source
             r = await c.post(
                 f"{BACKEND_URL}/validate/doc",
-                json={"doc_id": doc_id, "content": content},
+                json={"doc_id": doc_id},
             )
             r.raise_for_status()
             result = r.json()
         status = result.get("status", "?")
-        remarks = result.get("remarks", [])
-        await update.message.reply_text(
-            f"Validation {doc_id} — {status}\n"
-            f"Remarques Chief Analyst : {len(remarks)}\n"
-            f"Thread : {result.get('thread_id')}"
-        )
+        if status == "ALREADY_VALIDATED":
+            await update.message.reply_text(
+                f"{doc_id} — ALREADY_VALIDATED\nDocument inchangé, validation non relancée."
+            )
+        elif status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC"):
+            await update.message.reply_text(
+                f"{doc_id} — {status}\n{result.get('error', result.get('path', ''))}"
+            )
+        else:
+            remarks = result.get("remarks", [])
+            extra = f"\nSHA : {result.get('doc_sha','?')[:12]}..." if result.get("doc_sha") else ""
+            await update.message.reply_text(
+                f"Validation {doc_id} — {status}\n"
+                f"Remarques Chief Analyst : {len(remarks)}\n"
+                f"Thread : {result.get('thread_id')}{extra}"
+            )
     except Exception as e:
         logger.error(f"validate_single {doc_id}: {e}")
         await update.message.reply_text(f"Erreur validation {doc_id} : {e}")
 
 
 async def _handle_validate_batch(update: Update):
-    docs = []
-    for doc_id, filename in _GOV_FILES.items():
-        path = _DOCS_DIR / filename
-        if path.exists():
-            docs.append({"id": doc_id, "content": path.read_text()})
-    await update.message.reply_text(f"Batch validation lancé — {len(docs)} documents en file.\nCEO notifié après chaque document.")
+    # Pass only doc_ids — backend fetches content from canonical GitHub source
+    # and runs preflight check before launching
+    doc_ids = list(_GOV_FILES.keys())
+    await update.message.reply_text(
+        f"Preflight GitHub en cours — {len(doc_ids)} documents G..."
+    )
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
                 f"{BACKEND_URL}/validate/batch",
-                json={"documents": docs},
+                json={"doc_ids": doc_ids},
             )
             r.raise_for_status()
+            result = r.json()
+        if result.get("status") == "MISSING_DOCUMENTS":
+            missing = [m["doc_id"] for m in result.get("missing", [])]
+            await update.message.reply_text(
+                "Batch BLOQUÉ — documents absents de GitHub :\n"
+                + "\n".join(f"• {d}" for d in missing)
+            )
+        else:
+            await update.message.reply_text(
+                f"Batch lancé — {result.get('queued', len(doc_ids))} documents.\nCEO notifié après chaque document."
+            )
     except Exception as e:
         logger.error(f"validate_batch: {e}")
         await update.message.reply_text(f"Erreur lancement batch : {e}")
