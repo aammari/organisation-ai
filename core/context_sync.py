@@ -68,16 +68,33 @@ class OrgContextSync:
         except Exception:
             decisions_data = []
 
+        try:
+            validations = (
+                db.table("doc_validations")
+                .select("document_id,status,remarks")
+                .execute()
+            )
+            validations_data = {
+                v["document_id"]: {
+                    "status": v["status"],
+                    "remarks_count": len(v["remarks"] or []),
+                }
+                for v in (validations.data or [])
+            }
+        except Exception:
+            validations_data = {}
+
         ctx = {
             "id": "current",
             "version": "1.0",
             "project": project_data,
             "backlog": backlog_data,
             "decisions": decisions_data,
+            "validations": validations_data,
             "agents": {
                 "chief_architect": "claude-sonnet-4-6",
-                "chief_analyst": "groq",
-                "chief_of_staff": "claude-provisoire",
+                "chief_analyst": "claude-haiku-4-5-20251001",
+                "chief_of_staff": "claude-haiku-4-5-20251001",
             },
             "last_updated": datetime.now().isoformat(),
         }
@@ -119,6 +136,11 @@ class OrgContextSync:
             ]
         )
         agents = ctx.get("agents", {})
+        validations = ctx.get("validations", {})
+        val_lines = "\n".join(
+            f"- {doc_id} : {v['status']} ({v['remarks_count']} remarques)"
+            for doc_id, v in sorted(validations.items())
+        )
         formatted = f"""
 # CONTEXTE ORGANISATIONNEL
 ## Agents
@@ -128,6 +150,9 @@ class OrgContextSync:
 
 ## Backlog actif
 {backlog or 'Vide'}
+
+## Validations documents
+{val_lines or 'Aucune validation enregistrée'}
 
 ## Règles G-11
 - Signer chaque message
