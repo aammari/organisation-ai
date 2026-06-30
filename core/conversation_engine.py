@@ -19,6 +19,7 @@ from core.adoption_service import adoption_svc
 from core.compliance_engine import compliance_engine
 from core.document_improvement_engine import die
 from core.goal_planner import goal_planner
+from core.llm_registry import llm_registry
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,8 @@ _ADVICE_INTENT_KW = [
     "si tu étais à ma place", "meilleure prochaine action",
     "que faire maintenant", "par où commencer",
     "première action", "quelle est la priorité",
+    "quel est le meilleur investissement", "que ferais-tu maintenant",
+    "quelle est la plus grosse faiblesse", "si tu étais moi",
 ]
 
 _QUESTION_MODE_KW = [
@@ -93,11 +96,60 @@ _QUESTION_MODE_KW = [
     "qu'est-il", "quel est l'objectif", "quelle est la raison",
 ]
 
+# Modal/conditional phrasing → question, not action
+_MODAL_KW = [
+    "peut-on", "est-il possible", "serait-il possible", "pourrait-on",
+    "est-ce que je peux", "est-ce possible", "avons-nous la possibilité",
+]
+
+# List non-adopted docs
+_LIST_ADOPT_KW = [
+    "restent à adopter", "reste à adopter", "pas encore adoptés",
+    "non adoptés", "quels documents à adopter", "liste des documents",
+    "quels sont les documents à adopter",
+]
+
+# CEO WPs list
+_CEO_WPS_KW = [
+    "attendent ma décision", "en attente de ma décision",
+    "quels wps", "wps ceo", "wp en attente", "work packages en attente",
+    "décisions en attente", "wps qui attendent",
+]
+
+# FootballIQ reasoning sub-types
+_FOOTBALLIQ_CAUSAL_KW = ["pourquoi", "raison", "cause", "n'est pas prêt", "pas prêt", "bloque", "empêche"]
+_FOOTBALLIQ_CHECKLIST_KW = ["que manque-t-il", "qu'est-ce qui manque", "checklist", "manque avant", "il reste quoi"]
+_FOOTBALLIQ_FORECAST_KW = ["quand", "combien de temps", "délai", "timeline", "dans combien", "estimation"]
+_FOOTBALLIQ_JUDGMENT_KW = ["si tu étais", "à ta place", "ferais-tu", "que ferais", "jugement", "conseil"]
+
+_WP_TYPE_LABELS = {
+    "ORG_AUDIT": "Audit org.",
+    "AUTO_FIX": "Auto-fix",
+    "COMPLIANCE_FIX": "Conformité",
+    "DOCUMENT_CREATION": "Création doc.",
+    "IMPROVEMENT": "Amélioration",
+    "VALIDATION": "Validation",
+}
+
 _WP_ID_RE = re.compile(r'\b(WP-[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\b', re.IGNORECASE)
 
 
 def _extract_wp_ids(message: str) -> list[str]:
     return [m.upper() for m in _WP_ID_RE.findall(message)]
+
+
+def _footballiq_reasoning_type(message: str) -> str:
+    """Detect the executive reasoning type for a FootballIQ query."""
+    msg = message.lower()
+    if any(k in msg for k in _FOOTBALLIQ_JUDGMENT_KW):
+        return "JUDGMENT"
+    if any(k in msg for k in _FOOTBALLIQ_FORECAST_KW):
+        return "FORECAST"
+    if any(k in msg for k in _FOOTBALLIQ_CHECKLIST_KW):
+        return "CHECKLIST"
+    if any(k in msg for k in _FOOTBALLIQ_CAUSAL_KW):
+        return "CAUSAL"
+    return "GO_NOGO"  # default: "Est-ce qu'on peut lancer?"
 
 
 def _classify_deterministic(message: str) -> tuple[str, list[str]]:
@@ -301,17 +353,21 @@ async def _wf_org_status() -> str:
     reasons = _health_reasons(comp_score, escalated, waiting_ceo)
 
     adopted_ids = [d["doc_id"] for d in adopted]
-    impl_docs = list(dict.fromkeys(r["doc_id"] for r in runs_impl))
-    prop_docs = list(dict.fromkeys(r["doc_id"] for r in runs_prop))
-    esc_die_docs = list(dict.fromkeys(r["doc_id"] for r in runs_esc))
+    adopted_ids_set = set(adopted_ids)
+    # COS-01: filter ADOPTED docs out of pending/in-progress categories
+    impl_docs = list(dict.fromkeys(r["doc_id"] for r in runs_impl if r["doc_id"] not in adopted_ids_set))
+    prop_docs = list(dict.fromkeys(r["doc_id"] for r in runs_prop if r["doc_id"] not in adopted_ids_set))
+    esc_die_docs = list(dict.fromkeys(r["doc_id"] for r in runs_esc if r["doc_id"] not in adopted_ids_set))
 
-    # WP decomposition by type (PARTIE L)
+    # WP decomposition — RESP-03: readable type labels
     wp_by_type: dict[str, list[str]] = {}
     for w in wps:
         ctx = w.get("context_snapshot") or {}
-        wp_type = ctx.get("type", w.get("title", "")[:12] or "Autre")
         if w.get("status") == "WAITING_CEO":
             wp_type = "Décision CEO"
+        else:
+            raw_type = ctx.get("type", "")
+            wp_type = _WP_TYPE_LABELS.get(raw_type, "Autre") if raw_type else "Autre"
         wp_by_type.setdefault(wp_type, []).append(w.get("id", "?"))
 
     # Build prioritized, deduplicated action list (max 5)
@@ -412,7 +468,9 @@ async def _wf_org_blockers() -> str:
     health = _health_label(comp_score, len(escalated), len(waiting))
     alerts = _alerts_block(comp_score, escalated, waiting)
     reasons = _health_reasons(comp_score, escalated, waiting)
-    impl_docs = list(dict.fromkeys(r["doc_id"] for r in impl_runs))
+    adopted_ids_set = {d["doc_id"] for d in adopted}
+    # COS-01: filter ADOPTED docs from impl_docs
+    impl_docs = list(dict.fromkeys(r["doc_id"] for r in impl_runs if r["doc_id"] not in adopted_ids_set))
     adopted_g = [d for d in adopted if d["doc_id"].startswith("G-")]
     non_adopted_count = max(0, 11 - len(adopted_g))
 
@@ -480,7 +538,7 @@ async def _wf_org_blockers() -> str:
     return "\n".join(lines)
 
 
-async def _wf_footballiq() -> str:
+async def _wf_footballiq(reasoning_type: str = "GO_NOGO") -> str:
     try:
         plan = await goal_planner.produce_plan("lancer FootballIQ")
     except Exception as e:
@@ -499,6 +557,16 @@ async def _wf_footballiq() -> str:
     else:
         verdict = "NOT READY — travail significatif requis"
         health = "Critique"
+
+    # REASON-01-05: alternate rendering per reasoning type
+    if reasoning_type == "CAUSAL":
+        return _wf_footballiq_causal(plan, readiness, missing, adopted_docs)
+    if reasoning_type == "CHECKLIST":
+        return _wf_footballiq_checklist(plan, readiness, missing)
+    if reasoning_type == "FORECAST":
+        return _wf_footballiq_forecast(plan, readiness, missing)
+    if reasoning_type == "JUDGMENT":
+        return _wf_footballiq_judgment(plan, readiness, missing, verdict)
 
     # Impact projection: each doc adoption ≈ readiness gain
     if missing:
@@ -559,6 +627,94 @@ async def _wf_footballiq() -> str:
             if a.get("cmd"):
                 lines.append(f"   Commande : {a['cmd']}")
 
+    return "\n".join(lines)
+
+
+def _wf_footballiq_causal(plan: dict, readiness: int, missing: list, adopted_docs: list) -> str:
+    """REASON-02: Causal analysis — why FootballIQ is not ready."""
+    SEP = "\n───────────────────"
+    lines = [f"Analyse causale — FootballIQ {_today()}", f"\nReadiness : {readiness}%", SEP]
+    if not missing:
+        lines.append("\n✓ Tous les documents requis sont adoptés.")
+        lines.append("La cause principale d'un readiness < 100% est la conformité opérationnelle.")
+    else:
+        lines.append(f"\nCause principale : {len(missing)} document(s) requis non adoptés")
+        for doc in missing[:6]:
+            lines.append(f"• {doc} — bloque directement la readiness FootballIQ")
+    if plan["blockers"]:
+        lines.append("\nAutres causes :")
+        for b in plan["blockers"][:3]:
+            lines.append(f"• {b}")
+    lines += [SEP, "\nPour débloquer, adoptez les documents ci-dessus dans l'ordre listé."]
+    return "\n".join(lines)
+
+
+def _wf_footballiq_checklist(plan: dict, readiness: int, missing: list) -> str:
+    """REASON-03: Ordered checklist of remaining items."""
+    SEP = "\n───────────────────"
+    total = len(plan["required_documents"])
+    done = total - len(missing)
+    lines = [
+        f"Checklist FootballIQ — {_today()}",
+        f"\nProgression : {done}/{total} documents adoptés ({readiness}%)",
+        SEP, "\nÀ compléter :"
+    ]
+    for i, doc in enumerate(missing, 1):
+        lines.append(f"{i}. [ ] {doc}  →  adopte {doc}")
+    if not missing:
+        lines.append("✓ Tous les items sont cochés — lancement possible.")
+    lines += [SEP, f"\nObjectif : {total}/{total} → passer à 100% readiness."]
+    return "\n".join(lines)
+
+
+def _wf_footballiq_forecast(plan: dict, readiness: int, missing: list) -> str:
+    """REASON-04: Timeline forecast for FootballIQ launch."""
+    SEP = "\n───────────────────"
+    if not missing:
+        lines = [f"Forecast FootballIQ — {_today()}", "\n✓ Conditions remplies — lancement possible maintenant."]
+        return "\n".join(lines)
+    # Rough estimate: 1 DIE cycle ≈ 3 iterations × 30 min each = ~2h per doc
+    est_hours = len(missing) * 2
+    est_days = max(1, round(est_hours / 8))
+    lines = [
+        f"Forecast FootballIQ — {_today()}",
+        f"\nReadiness actuelle : {readiness}%",
+        SEP,
+        f"\nConditions restantes : {len(missing)} document(s) à adopter",
+        f"Estimation : ~{est_days} jour(s) de traitement (cycles DIE séquentiels)",
+        "\nHypothèses : 1 cycle DIE par document, aucune escalade.",
+        SEP,
+        "\nFacteurs de risque :",
+        "• Escalades validation → +1 cycle par document",
+        "• Gaps conformité non résolus → bloque l'adoption",
+    ]
+    return "\n".join(lines)
+
+
+def _wf_footballiq_judgment(plan: dict, readiness: int, missing: list, verdict: str) -> str:
+    """REASON-05: Executive judgment — 'if I were you' recommendation."""
+    SEP = "\n───────────────────"
+    lines = [f"Jugement exécutif — FootballIQ {_today()}", SEP]
+    if readiness >= 80:
+        lines += [
+            "\nMon jugement : lancez maintenant.",
+            "La readiness est suffisante. Attendre davantage n'améliore pas significativement le risque.",
+            "Risque principal : laisser l'inertie organisationnelle s'installer.",
+        ]
+    elif missing:
+        top = missing[0]
+        lines += [
+            f"\nMon jugement : concentrez tout sur {top}.",
+            f"C'est le premier blocage. Une fois {top} adopté, la readiness progresse de façon significative.",
+            "Ne dispersez pas les ressources sur plusieurs documents en parallèle.",
+            f"Commande : adopte {top}",
+        ]
+    else:
+        lines += [
+            "\nMon jugement : résolvez les gaps de conformité en priorité.",
+            "Les documents sont en ordre, mais la conformité opérationnelle bloque le lancement.",
+        ]
+    lines += [SEP, f"\n(Verdict objectif : {verdict} — Readiness {readiness}%)"]
     return "\n".join(lines)
 
 
@@ -629,11 +785,22 @@ async def _wf_doc_status(doc_ids: list[str]) -> str:
     if canonical == "ADOPTED":
         lines.append("\nAucune action requise.")
     elif canonical == "WAITING_CEO":
+        # RESP-01: resolve actual WP instead of placeholder
+        try:
+            wp_rows = (db.table("work_packages").select("id")
+                       .eq("status", "WAITING_CEO")
+                       .ilike("title", f"%{doc_id}%").limit(1).execute())
+            wp_real = wp_rows.data[0]["id"] if wp_rows.data else None
+        except Exception:
+            wp_real = None
         lines.append("\nJe recommande d'approuver ce document.")
         lines.append("Pourquoi : décision D3 bloquante — l'organisation attend votre validation.")
         lines.append("Impact : débloque l'adoption et les flux dépendants.")
         lines.append("Risque : faible — adoption réversible.")
-        lines.append("Commande : A <WP-ID associé>")
+        if wp_real:
+            lines.append(f"Commande : A {wp_real}")
+        else:
+            lines.append("Commande : A <WP-ID>  (voir : quels WPs attendent ma décision ?)")
     elif canonical == "ADOPTION_PROPOSAL":
         lines.append(f"\nJe recommande d'adopter {doc_id}.")
         lines.append("Pourquoi : document validé et conforme — prêt à entrer en vigueur.")
@@ -836,6 +1003,92 @@ async def _wf_executive_advice() -> str:
         for i, s in enumerate(secondary, 1):
             lines.append(f"{i}. {s['text']} → {s['cmd']}")
 
+    return "\n".join(lines)
+
+
+async def _wf_pending_adoptions() -> str:
+    """List all non-adopted docs with their current status (MODE-01)."""
+    db = get_supabase()
+    adopted = adoption_svc.list_adopted()
+    adopted_map = {d["doc_id"]: d for d in adopted}
+
+    all_g_docs = [f"G-{str(i).zfill(2)}" for i in range(1, 12)]
+    non_adopted: list[tuple[str, str, str | None]] = []
+
+    for doc_id in all_g_docs:
+        if adopted_map.get(doc_id, {}).get("status") == "ADOPTED":
+            continue
+        try:
+            val_rows = (db.table("doc_validations").select("status")
+                        .eq("document_id", doc_id).order("validated_at", desc=True).limit(1).execute())
+            val_st = val_rows.data[0]["status"] if val_rows.data else None
+        except Exception:
+            val_st = None
+        run = die.get_latest_run(doc_id)
+        run_st = run.get("status") if run else None
+
+        if val_st == "RESOLVED" or run_st == "ADOPTION_PROPOSAL":
+            state, cmd = "PRÊT à adopter", f"adopte {doc_id}"
+        elif val_st == "ESCALATED" or run_st == "ESCALATED":
+            state, cmd = "ESCALATED", f"améliore {doc_id}"
+        elif val_st:
+            state, cmd = f"Validation {val_st}", f"valide {doc_id}"
+        else:
+            state, cmd = "Non validé", f"valide {doc_id}"
+        non_adopted.append((doc_id, state, cmd))
+
+    if not non_adopted:
+        return "✓ Tous les documents gouvernance sont adoptés."
+
+    SEP = "\n───────────────────"
+    ready = [(d, s, c) for d, s, c in non_adopted if "PRÊT" in s]
+    others = [(d, s, c) for d, s, c in non_adopted if "PRÊT" not in s]
+
+    lines = [
+        f"Documents gouvernance non adoptés ({len(non_adopted)}/11) — {_today()}",
+        SEP,
+    ]
+    if ready:
+        lines.append(f"\nPrêts à adopter ({len(ready)}) :")
+        for doc_id, _, cmd in ready:
+            lines.append(f"• {doc_id} → {cmd}")
+    if others:
+        lines.append(f"\nEn cours de traitement ({len(others)}) :")
+        for doc_id, state, cmd in others[:8]:
+            lines.append(f"• {doc_id} — {state}")
+
+    if ready:
+        lines += [SEP, f"\nJe recommande de commencer par {ready[0][0]} — prêt à adopter immédiatement."]
+    return "\n".join(lines)
+
+
+async def _wf_ceo_wps() -> str:
+    """List WPs awaiting CEO decision (OBJ-03)."""
+    db = get_supabase()
+    try:
+        pending_rows = (db.table("work_packages")
+                        .select("id,title,priority,required_decision_level,status,created_at")
+                        .eq("approved", False)
+                        .in_("status", ["PENDING", "WAITING_CEO"])
+                        .order("priority")
+                        .order("created_at")
+                        .limit(10).execute())
+        pending = pending_rows.data or []
+    except Exception as e:
+        return f"Erreur lecture WPs CEO : {e}"
+
+    if not pending:
+        return "✓ Aucun Work Package en attente de votre décision."
+
+    SEP = "\n───────────────────"
+    lines = [f"Work Packages en attente CEO — {_today()}", SEP]
+    for w in pending:
+        level = w.get("required_decision_level", "?")
+        lines.append(f"\n• {w['id']} ({w.get('priority','?')}, {level})")
+        lines.append(f"  {w.get('title','')[:65]}")
+        lines.append(f"  Commande : A {w['id']}")
+
+    lines += [SEP, f"\n{len(pending)} WP(s) en attente. Répondez A <WP-ID> pour approuver, B <WP-ID> pour refuser."]
     return "\n".join(lines)
 
 
@@ -1075,8 +1328,8 @@ async def _haiku_classify(message: str) -> dict:
     try:
         client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         resp = client.messages.create(
-            model=HAIKU_MODEL,
-            max_tokens=128,
+            model=llm_registry.get_model("classifier"),
+            max_tokens=llm_registry.get_max_tokens("classifier"),
             system=_HAIKU_SYSTEM,
             messages=[{"role": "user", "content": message}],
         )
@@ -1135,21 +1388,50 @@ class ConversationEngine:
     ) -> dict:
         msg_lower = message.lower()
 
-        # ── Pre-classification A: WP explanation (ECT-01) ──────────────────────
-        # "Explique-moi pourquoi WP-xxx nécessite..." → explain, never create WP
+        # ── Pre-classification A: bare WP-ID → explain WP (OBJ-01) ────────────
         wp_ids_in_msg = _extract_wp_ids(message)
+        msg_stripped = message.strip()
+        if wp_ids_in_msg and msg_stripped.upper() == wp_ids_in_msg[0].upper():
+            response = await _wf_explain_wp(wp_ids_in_msg[0])
+            logger.info(f"CE pre-class=EXPLAIN_WP(bare) wp={wp_ids_in_msg[0]}")
+            return {"intent": "EXPLAIN_WP", "confidence": 1.0, "response": response,
+                    "source": "deterministic", "doc_ids": []}
+
+        # ── Pre-classification B: WP explanation question (ECT-01) ─────────────
         if wp_ids_in_msg and any(k in msg_lower for k in _QUESTION_MODE_KW):
             response = await _wf_explain_wp(wp_ids_in_msg[0])
             logger.info(f"CE pre-class=EXPLAIN_WP wp={wp_ids_in_msg[0]}")
             return {"intent": "EXPLAIN_WP", "confidence": 1.0, "response": response,
                     "source": "deterministic", "doc_ids": []}
 
-        # ── Pre-classification B: executive advice (ECT-03, ECT-07) ───────────
+        # ── Pre-classification C: CEO WPs list (OBJ-03) ─────────────────────────
+        if any(k in msg_lower for k in _CEO_WPS_KW):
+            response = await _wf_ceo_wps()
+            logger.info("CE pre-class=CEO_WPS")
+            return {"intent": "CEO_WPS", "confidence": 1.0, "response": response,
+                    "source": "deterministic", "doc_ids": []}
+
+        # ── Pre-classification D: list adoptable docs (MODE-01) ─────────────────
+        if any(k in msg_lower for k in _LIST_ADOPT_KW):
+            response = await _wf_pending_adoptions()
+            logger.info("CE pre-class=PENDING_ADOPTIONS")
+            return {"intent": "PENDING_ADOPTIONS", "confidence": 1.0, "response": response,
+                    "source": "deterministic", "doc_ids": []}
+
+        # ── Pre-classification E: executive advice (ECT-03, ECT-07) ─────────────
         if any(k in msg_lower for k in _ADVICE_INTENT_KW):
             response = await _wf_executive_advice()
             logger.info("CE pre-class=EXECUTIVE_ADVICE")
             return {"intent": "EXECUTIVE_ADVICE", "confidence": 1.0, "response": response,
                     "source": "deterministic", "doc_ids": []}
+
+        # ── Pre-classification F: modal adoption question → doc_status (MODE-03) ─
+        doc_ids_regex = _extract_doc_ids(message)
+        if doc_ids_regex and any(k in msg_lower for k in _MODAL_KW):
+            response = await _wf_doc_status(doc_ids_regex)
+            logger.info(f"CE pre-class=DOC_STATUS(modal) docs={doc_ids_regex}")
+            return {"intent": "DOCUMENT_STATUS", "confidence": 1.0, "response": response,
+                    "source": "deterministic", "doc_ids": doc_ids_regex}
 
         classification = await self.classify(message)
         intent = classification["intent"]
@@ -1178,7 +1460,7 @@ class ConversationEngine:
             elif intent == "ORGANIZATION_BLOCKERS":
                 response = await _wf_org_blockers()
             elif intent == "FOOTBALLIQ_READINESS":
-                response = await _wf_footballiq()
+                response = await _wf_footballiq(_footballiq_reasoning_type(message))
             elif intent == "EXECUTIVE_ADVICE":
                 response = await _wf_executive_advice()
             elif intent == "DOCUMENT_STATUS":
