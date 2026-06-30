@@ -2,50 +2,94 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://aammari.github.io/organisation-ai/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/architecture/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/governance/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/AIEthics-G09-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/AgentOnboarding-G03-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/CEOCommunicationProtocol-G11-v1_1/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/CapabilityLifecycle-G06-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/ConfigManagement-G04-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/DataRetention-G02-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/ExceptionWaiver-G08-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/Glossary-G07-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/MeetingProtocol-G01-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/OrgHealthReview-G10-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
+    </url>
+    <url>
+         <loc>https://aammari.github.io/organisation-ai/governance/SecurityPolicy-G05-v1_0/</loc>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/acp_v1_3/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/agent_model_v1_2/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/constitution_v1_5/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/decision_governance_v1_3/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/glossary_g07/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/operational_workflow_v1_1/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/kernel/wsm_v1_2/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/operations/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
     <url>
          <loc>https://aammari.github.io/organisation-ai/technical-design/</loc>
-         <lastmod>2026-06-29</lastmod>
+         <lastmod>2026-06-30</lastmod>
     </url>
 </urlset>
