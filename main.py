@@ -19,7 +19,7 @@ from config import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL,
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
 )
-from core.langgraph_app import workflow_app
+from core.langgraph_app import workflow_app, get_model_for_task
 from core.cost_tracker import CostTracker
 from core.context_sync import OrgContextSync
 
@@ -135,6 +135,14 @@ def status():
             "chief_architect": CLAUDE_MODEL,
             "chief_analyst": "claude-haiku-4-5-20251001",
         },
+        "model_routing": {
+            task: get_model_for_task(task)
+            for task in [
+                "cycle_analyse", "cycle_production", "cycle_action",
+                "thread_turn_1", "thread_turn_2", "thread_turn_3",
+                "validate", "qualify_intent", "ceo_intervention",
+            ]
+        },
         "cost": {
             "today_usd": round(daily_cost, 4),
             "month_usd": round(monthly_cost, 4),
@@ -217,10 +225,12 @@ def run_cycle(request: dict):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "intent": result["intent"],
         "analyst_decision": result["analyst_decision"],
+        "model_used": result.get("workflow_state", "cycle_production"),
     }
     return {
         "intent": result["intent"],
         "analyst_decision": result["analyst_decision"],
+        "model_used": result.get("workflow_state", "cycle_production"),
         "response": result["final_response"],
     }
 
@@ -374,11 +384,13 @@ async def thread_start(body: ThreadStartIn):
                 # Clear intervention so it isn't re-applied
                 db.table("agent_threads").update({"ceo_input": None}).eq("id", thread_id).execute()
 
-        # Chief Architect produces ACP
+        # Chief Architect produces ACP — Sonnet pour tour 1, Haiku pour tours 2+
+        arch_task = "thread_turn_1" if turn == 1 else f"thread_turn_{turn}"
+        arch_model = get_model_for_task(arch_task)
         arch_resp = await asyncio.to_thread(
             anthropic_client.messages.create,
-            model=CLAUDE_MODEL,
-            max_tokens=2048,
+            model=arch_model,
+            max_tokens=2048 if arch_model == CLAUDE_MODEL else 1024,
             system=(
                 "Tu es Chief Architect. Produis un ACP (Architect Contribution Proposal) "
                 "clair et structuré sur le sujet donné. Sois concis."
@@ -389,7 +401,7 @@ async def thread_start(body: ThreadStartIn):
             CostTracker().log_cycle(
                 input_tokens=arch_resp.usage.input_tokens,
                 output_tokens=arch_resp.usage.output_tokens,
-                model=CLAUDE_MODEL,
+                model=arch_model,
             )
         except Exception:
             pass

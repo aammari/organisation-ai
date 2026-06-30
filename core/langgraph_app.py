@@ -61,9 +61,12 @@ def call_architect(state: OrgState) -> OrgState:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     org_ctx = _sync.get_formatted()
     system = ARCHITECT_SYSTEM_PROMPT + "\n\n" + org_ctx
+    task_type = qualify_complexity(state["ceo_request"])
+    model = get_model_for_task(task_type)
+    state["workflow_state"] = task_type
     message = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
+        model=model,
+        max_tokens=4096 if model == CLAUDE_MODEL else 2048,
         system=system,
         messages=[{"role": "user", "content": state["ceo_request"]}]
     )
@@ -72,7 +75,7 @@ def call_architect(state: OrgState) -> OrgState:
         CostTracker().log_cycle(
             input_tokens=message.usage.input_tokens,
             output_tokens=message.usage.output_tokens,
-            model=CLAUDE_MODEL,
+            model=model,
         )
     except Exception:
         pass
@@ -80,6 +83,34 @@ def call_architect(state: OrgState) -> OrgState:
 
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+_SIMPLE_KEYWORDS = {
+    "état", "status", "liste", "résume", "combien",
+    "qui", "quand", "où", "quoi", "quel", "quelle",
+    "montre", "affiche", "donne",
+}
+
+
+def get_model_for_task(task_type: str) -> str:
+    routing = {
+        "validate": HAIKU_MODEL,
+        "qualify_intent": HAIKU_MODEL,
+        "ceo_intervention": HAIKU_MODEL,
+        "thread_turn_1": CLAUDE_MODEL,
+        "thread_turn_2": HAIKU_MODEL,
+        "thread_turn_3": HAIKU_MODEL,
+        "cycle_analyse": HAIKU_MODEL,
+        "cycle_production": CLAUDE_MODEL,
+        "cycle_action": CLAUDE_MODEL,
+    }
+    return routing.get(task_type, HAIKU_MODEL)
+
+
+def qualify_complexity(request: str) -> str:
+    lower = request.lower()
+    if any(k in lower for k in _SIMPLE_KEYWORDS):
+        return "cycle_analyse"
+    return "cycle_production"
 
 
 def validate_output(state: OrgState) -> OrgState:
