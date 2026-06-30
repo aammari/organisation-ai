@@ -29,6 +29,7 @@ from core.context_service import context_svc
 from core.compliance_engine import compliance_engine
 from core.goal_planner import goal_planner
 from core.document_improvement_engine import die
+from core.conversation_engine import conversation_engine
 
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
@@ -683,23 +684,29 @@ async def route_message(
             "action_id": action_id,
         }
 
-    # cycle_simple or cycle
-    state = workflow_app.invoke({
-        "ceo_request": message,
-        "intent": None,
-        "priority": None,
-        "workflow_state": "IMPLEMENTING",
-        "architect_output": None,
-        "analyst_decision": None,
-        "deviation": None,
-        "execution_result": None,
-        "final_response": None,
-    })
-    cos.db.table("action_ledger").update({
-        "state": "DONE",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", action_id).execute()
-    return {"response": state.get("final_response", ""), "route": route, "action_id": action_id}
+    # All non-thread/non-escalation messages → ConversationEngine (M07)
+    # Chief Architect is no longer called by default from /route.
+    result = await conversation_engine.handle(
+        message,
+        action_id=action_id,
+        background_tasks=background_tasks,
+        tg_notify=_tg,
+    )
+    try:
+        cos.db.table("action_ledger").update({
+            "state": "DONE",
+            "type": result.get("intent", "cycle"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", action_id).execute()
+    except Exception as e:
+        logger.warning(f"action_ledger update: {e}")
+    return {
+        "response": result.get("response", ""),
+        "intent": result.get("intent"),
+        "confidence": result.get("confidence"),
+        "route": "conversation_engine",
+        "action_id": action_id,
+    }
 
 
 @app.get("/escalation/pending")
