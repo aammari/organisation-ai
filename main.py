@@ -24,6 +24,10 @@ from core.langgraph_app import workflow_app, get_model_for_task
 from core.cost_tracker import CostTracker
 from core.context_sync import OrgContextSync
 from core.chief_of_staff import cos, ACTIVE_WP_ID
+from core.adoption_service import adoption_svc
+from core.context_service import context_svc
+from core.compliance_engine import compliance_engine
+from core.goal_planner import goal_planner
 
 INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
@@ -993,6 +997,76 @@ async def get_context():
 async def refresh_context():
     ctx = await OrgContextSync().refresh()
     return {"status": "refreshed", "last_updated": ctx.get("last_updated")}
+
+
+# ── WP-M02 — Policy Adoption ───────────────────────────────────────────────
+
+@app.post("/adoption/request")
+async def adoption_request(request: dict):
+    doc_id = request.get("doc_id", "").strip().upper()
+    if not doc_id:
+        raise HTTPException(status_code=422, detail="doc_id required")
+    decision_level = request.get("decision_level")
+    result = await adoption_svc.request_adoption(doc_id, decision_level=decision_level)
+    if result.get("status") == "WAITING_CEO":
+        await _tg(
+            f"ADOPTION D3 — {doc_id}\n\n"
+            f"Version : {result.get('version', '?')}\n"
+            f"SHA : {result.get('doc_sha', '?')}\n"
+            f"Décision CEO requise pour adoption officielle."
+        )
+    return result
+
+
+@app.get("/adoption/registry")
+async def adoption_registry_list():
+    return {"adopted": adoption_svc.list_adopted()}
+
+
+@app.get("/adoption/{doc_id}")
+async def adoption_get(doc_id: str):
+    record = adoption_svc.get_adoption(doc_id.upper())
+    if not record:
+        return {"status": "NOT_FOUND", "doc_id": doc_id.upper()}
+    return record
+
+
+# ── WP-M03 — Context Service ───────────────────────────────────────────────
+
+@app.post("/context/build")
+async def context_build(request: dict):
+    message = request.get("message", "").strip()
+    role = request.get("role", "chief_architect")
+    if not message:
+        raise HTTPException(status_code=422, detail="message required")
+    return await context_svc.build_context_for_mission(message, role)
+
+
+# ── WP-M05 — Compliance Engine ─────────────────────────────────────────────
+
+@app.get("/compliance/status")
+async def compliance_status():
+    return compliance_engine.compute_compliance_score()
+
+
+@app.get("/compliance/doc/{doc_id}")
+async def compliance_doc(doc_id: str):
+    return compliance_engine.check_document_compliance(doc_id.upper())
+
+
+@app.get("/compliance/gaps")
+async def compliance_gaps():
+    return {"proposed_work_packages": compliance_engine.create_gap_work_packages()}
+
+
+# ── WP-M04 — Goal Planner ──────────────────────────────────────────────────
+
+@app.post("/goal/plan")
+async def goal_plan(request: dict):
+    goal = request.get("goal", "").strip()
+    if not goal:
+        raise HTTPException(status_code=422, detail="goal required")
+    return await goal_planner.produce_plan(goal)
 
 
 # Dashboard CEO — served at root
