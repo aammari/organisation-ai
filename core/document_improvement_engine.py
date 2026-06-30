@@ -184,65 +184,88 @@ class DocumentImprovementEngine:
             )
             return
 
-        # ── VALIDATION via /validate/doc (self-HTTP) ─────────────────────
-        # Delegates to the existing endpoint which handles:
-        # - GitHub fetch (with GITHUB_TOKEN from env)
-        # - SHA dedup (ALREADY_VALIDATED if unchanged)
-        # - Agent debate (Chief Architect + Chief Analyst)
+        # ── VALIDATION — Supabase-first strategy ─────────────────────────
+        # First run (iteration==0): reuse existing Supabase validation (M06-H6).
+        # Re-run (iteration>0, after improvement commit): call /validate/doc for fresh result.
         self._update_run(run_id, {"status": "VALIDATION"})
 
-        try:
-            async with httpx.AsyncClient(timeout=300) as c:
-                r = await c.post(
-                    f"{_BACKEND_URL}/validate/doc",
-                    json={"doc_id": doc_id},
-                )
-                r.raise_for_status()
-                val_api = r.json()
-        except Exception as e:
-            self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"validate/doc error: {str(e)[:200]}"})
-            await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : erreur validation ({str(e)[:100]})")
-            return
+        last_val = self._latest_validation(doc_id)
+        force_revalidate = iteration > 0  # only after CEO pushes a fix
 
-        api_status = val_api.get("status", "ERROR")
-
-        if api_status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC", "ERROR"):
-            self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"{api_status}: {val_api.get('detail', val_api.get('error', ''))}"})
-            await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : {api_status}")
-            return
-
-        current_doc_sha = val_api.get("doc_sha")
-        current_commit_sha = val_api.get("commit_sha")
-        self._update_run(run_id, {
-            "last_commit_sha": current_commit_sha,
-            "last_doc_sha": current_doc_sha,
-        })
-
-        if api_status == "ALREADY_VALIDATED":
-            # M06-H6: SHA unchanged → reuse existing validation
-            last_val = self._latest_validation(doc_id)
+        if last_val and not force_revalidate:
+            # M06-H6: existing validation → reuse (SHA assumed unchanged on first run)
             val_result = {
-                "status": last_val["status"] if last_val else "RESOLVED",
-                "remarks": (last_val.get("remarks") or []) if last_val else [],
-                "doc_sha": current_doc_sha,
-                "commit_sha": current_commit_sha,
+                "status": last_val["status"],
+                "remarks": last_val.get("remarks") or [],
+                "doc_sha": last_val.get("doc_sha"),
+                "commit_sha": last_val.get("commit_sha"),
                 "reused": True,
             }
-            await tg_notify(f"DIE — {doc_id}\nSHA inchangé — validation réutilisée (0 appel agent).")
-        else:
-            # Full validation ran
+            self._update_run(run_id, {
+                "last_doc_sha": last_val.get("doc_sha"),
+                "last_commit_sha": last_val.get("commit_sha"),
+            })
+            await tg_notify(f"DIE — {doc_id}\nValidation réutilisée depuis Supabase (SHA inchangé — 0 appel agent).")
+        elif not last_val and not force_revalidate:
+            # No prior validation at all → must call agents
+            try:
+                async with httpx.AsyncClient(timeout=300) as c:
+                    r = await c.post(f"{_BACKEND_URL}/validate/doc", json={"doc_id": doc_id})
+                    r.raise_for_status()
+                    val_api = r.json()
+            except Exception as e:
+                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"validate/doc: {str(e)[:200]}"})
+                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : validation impossible ({str(e)[:80]})")
+                return
+            api_status = val_api.get("status", "ERROR")
+            if api_status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC", "ERROR"):
+                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"{api_status}: {val_api.get('error', '')}"})
+                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : {api_status}")
+                return
             val_result = {
                 "status": api_status,
                 "remarks": val_api.get("remarks") or [],
-                "doc_sha": current_doc_sha,
-                "commit_sha": current_commit_sha,
-                "thread_id": val_api.get("thread_id", ""),
+                "doc_sha": val_api.get("doc_sha"),
+                "commit_sha": val_api.get("commit_sha"),
                 "reused": False,
             }
             self._update_run(run_id, {
+                "last_doc_sha": val_api.get("doc_sha"),
+                "last_commit_sha": val_api.get("commit_sha"),
                 "last_validation_id": f"VAL-{doc_id}-{val_api.get('thread_id','')}",
                 "iteration": iteration + 1,
             })
+        else:
+            # force_revalidate=True: post-improvement re-run → call agents
+            try:
+                async with httpx.AsyncClient(timeout=300) as c:
+                    r = await c.post(f"{_BACKEND_URL}/validate/doc", json={"doc_id": doc_id})
+                    r.raise_for_status()
+                    val_api = r.json()
+            except Exception as e:
+                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"revalidate: {str(e)[:200]}"})
+                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : revalidation impossible ({str(e)[:80]})")
+                return
+            api_status = val_api.get("status", "ERROR")
+            if api_status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC", "ERROR"):
+                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"revalidate {api_status}"})
+                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : revalidation {api_status}")
+                return
+            val_result = {
+                "status": api_status if api_status != "ALREADY_VALIDATED" else (last_val["status"] if last_val else "RESOLVED"),
+                "remarks": val_api.get("remarks") or (last_val.get("remarks") or [] if last_val else []),
+                "doc_sha": val_api.get("doc_sha"),
+                "commit_sha": val_api.get("commit_sha"),
+                "reused": api_status == "ALREADY_VALIDATED",
+            }
+            new_iter = iteration + 1
+            self._update_run(run_id, {
+                "last_doc_sha": val_api.get("doc_sha"),
+                "last_commit_sha": val_api.get("commit_sha"),
+                "last_validation_id": f"VAL-{doc_id}-{val_api.get('thread_id','')}",
+                "iteration": new_iter,
+            })
+            iteration = new_iter
 
         # ── REMARK_ANALYSIS ───────────────────────────────────────────────
         self._update_run(run_id, {"status": "REMARK_ANALYSIS"})
