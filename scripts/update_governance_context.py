@@ -29,8 +29,8 @@ GOVERNANCE_FILES = [
 
 def extract_summary(content: str, max_chars: int = 600) -> str:
     lines = content.split("\n")
-    title = next((l for l in lines if l.startswith("# ")), "")
-    rules = [l for l in lines if l.startswith("**G-") and "**" in l[3:]]
+    title = next((ln for ln in lines if ln.startswith("# ")), "")
+    rules = [ln for ln in lines if ln.startswith("**G-") and "**" in ln[3:]]
     summary_lines = [title] + rules[:5]
     return "\n".join(summary_lines)[:max_chars]
 
