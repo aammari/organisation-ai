@@ -594,6 +594,19 @@ async def escalation_respond(request: dict, background_tasks: BackgroundTasks):
     return {"handled": True, "doc_id": doc_id, "response": response}
 
 
+@app.get("/escalation/pending")
+async def escalation_pending():
+    db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    result = (
+        db.table("pending_escalations")
+        .select("id,doc_id,thread_id,status,created_at")
+        .eq("status", "WAITING_CEO")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return {"pending": result.data or [], "count": len(result.data or [])}
+
+
 @app.post("/validate/doc")
 async def validate_doc(request: dict):
     doc_id = request.get("doc_id", "")

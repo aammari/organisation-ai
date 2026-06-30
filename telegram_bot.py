@@ -210,6 +210,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
+    # DEBUG — inspecter le message et les escalades en attente
+    logger.info(f"[DEBUG] message repr={repr(message)}")
+    logger.info(f"[DEBUG] upper={message.upper()!r} in_ab={message.upper() in ('A', 'B')}")
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{BACKEND_URL}/escalation/pending")
+            pending_esc = r.json().get("pending", [])
+        logger.info(f"[DEBUG] escalades WAITING_CEO: {pending_esc}")
+    except Exception as e:
+        logger.info(f"[DEBUG] escalade check error: {e}")
+
     # PRIORITÉ 1 — Réponse escalade CEO (avant tout autre routing)
     if message.upper() in ("A", "B"):
         try:
