@@ -16,13 +16,17 @@ Budget Protection: 0 LLM calls for classification (deterministic keywords).
 """
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
+
+import httpx
 
 from app.database import get_supabase
 from core.adoption_service import adoption_svc
 from core.compliance_engine import compliance_engine
-from core.doc_source import fetch_doc
+
+_BACKEND_URL = os.getenv("BACKEND_URL", "https://organisation-ai.onrender.com")
 
 logger = logging.getLogger(__name__)
 
@@ -180,43 +184,63 @@ class DocumentImprovementEngine:
             )
             return
 
-        # ── VALIDATION / SHA CHECK ─────────────────────────────────────────
+        # ── VALIDATION via /validate/doc (self-HTTP) ─────────────────────
+        # Delegates to the existing endpoint which handles:
+        # - GitHub fetch (with GITHUB_TOKEN from env)
+        # - SHA dedup (ALREADY_VALIDATED if unchanged)
+        # - Agent debate (Chief Architect + Chief Analyst)
         self._update_run(run_id, {"status": "VALIDATION"})
 
-        fetched = await fetch_doc(doc_id)
-        if fetched["status"] != "OK":
-            self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": fetched.get("error", fetched["status"])})
-            await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : {fetched['status']} ({fetched.get('path','?')})")
+        try:
+            async with httpx.AsyncClient(timeout=300) as c:
+                r = await c.post(
+                    f"{_BACKEND_URL}/validate/doc",
+                    json={"doc_id": doc_id},
+                )
+                r.raise_for_status()
+                val_api = r.json()
+        except Exception as e:
+            self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"validate/doc error: {str(e)[:200]}"})
+            await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : erreur validation ({str(e)[:100]})")
             return
 
-        current_doc_sha = fetched["doc_sha"]
-        current_commit_sha = fetched["commit_sha"]
+        api_status = val_api.get("status", "ERROR")
 
-        # SHA dedup: if doc unchanged since last validation, reuse existing result
-        last_val = self._latest_validation(doc_id)
-        if last_val and last_val.get("doc_sha") == current_doc_sha:
-            # M06-H6: SHA unchanged → no new validation
+        if api_status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC", "ERROR"):
+            self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"{api_status}: {val_api.get('detail', val_api.get('error', ''))}"})
+            await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : {api_status}")
+            return
+
+        current_doc_sha = val_api.get("doc_sha")
+        current_commit_sha = val_api.get("commit_sha")
+        self._update_run(run_id, {
+            "last_commit_sha": current_commit_sha,
+            "last_doc_sha": current_doc_sha,
+        })
+
+        if api_status == "ALREADY_VALIDATED":
+            # M06-H6: SHA unchanged → reuse existing validation
+            last_val = self._latest_validation(doc_id)
             val_result = {
-                "status": last_val["status"],
-                "remarks": last_val.get("remarks") or [],
+                "status": last_val["status"] if last_val else "RESOLVED",
+                "remarks": (last_val.get("remarks") or []) if last_val else [],
                 "doc_sha": current_doc_sha,
                 "commit_sha": current_commit_sha,
-                "thread_id": last_val.get("thread_id", ""),
                 "reused": True,
             }
-            self._update_run(run_id, {
-                "last_commit_sha": current_commit_sha,
-                "last_doc_sha": current_doc_sha,
-            })
-            await tg_notify(f"DIE — {doc_id}\nSHA inchangé — validation réutilisée (pas de nouvel appel agent).")
+            await tg_notify(f"DIE — {doc_id}\nSHA inchangé — validation réutilisée (0 appel agent).")
         else:
-            # New commit or first validation → run agents
-            from main import _validate_single_doc  # late import to avoid circular
-            val_result = await _validate_single_doc(doc_id, fetched["content"], fetched)
+            # Full validation ran
+            val_result = {
+                "status": api_status,
+                "remarks": val_api.get("remarks") or [],
+                "doc_sha": current_doc_sha,
+                "commit_sha": current_commit_sha,
+                "thread_id": val_api.get("thread_id", ""),
+                "reused": False,
+            }
             self._update_run(run_id, {
-                "last_commit_sha": current_commit_sha,
-                "last_doc_sha": current_doc_sha,
-                "last_validation_id": f"VAL-{doc_id}-{val_result.get('thread_id','')}",
+                "last_validation_id": f"VAL-{doc_id}-{val_api.get('thread_id','')}",
                 "iteration": iteration + 1,
             })
 
@@ -417,7 +441,11 @@ class DocumentImprovementEngine:
 
     async def check_github_change(self, doc_id: str) -> dict:
         """Check if GitHub commit_sha changed since last run — trigger revalidation if so."""
-        fetched = await fetch_doc(doc_id)
+        from core.doc_source import fetch_doc
+        try:
+            fetched = await fetch_doc(doc_id)
+        except Exception as e:
+            return {"changed": False, "status": "ERROR", "error": str(e)}
         if fetched["status"] != "OK":
             return {"changed": False, "status": fetched["status"]}
 
