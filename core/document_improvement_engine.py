@@ -185,16 +185,15 @@ class DocumentImprovementEngine:
             )
             return
 
-        # ── VALIDATION — Supabase-first strategy ─────────────────────────
-        # First run (iteration==0): reuse existing Supabase validation (M06-H6).
-        # Re-run (iteration>0, after improvement commit): call /validate/doc for fresh result.
+        # ── VALIDATION — Supabase-first strategy (M06-H6) ────────────────
+        # Always reuse latest Supabase validation (0 GitHub calls).
+        # GitHub is only used when no prior validation exists at all.
+        # Explicit revalidation after a GitHub fix uses /improve/check/{doc_id}.
         self._update_run(run_id, {"status": "VALIDATION"})
 
         last_val = self._latest_validation(doc_id)
-        force_revalidate = iteration > 0  # only after CEO pushes a fix
 
-        if last_val and not force_revalidate:
-            # M06-H6: existing validation → reuse (SHA assumed unchanged on first run)
+        if last_val:
             val_result = {
                 "status": last_val["status"],
                 "remarks": last_val.get("remarks") or [],
@@ -206,9 +205,9 @@ class DocumentImprovementEngine:
                 "last_doc_sha": last_val.get("doc_sha"),
                 "last_commit_sha": last_val.get("commit_sha"),
             })
-            await tg_notify(f"DIE — {doc_id}\nValidation réutilisée depuis Supabase (SHA inchangé — 0 appel agent).")
-        elif not last_val and not force_revalidate:
-            # No prior validation at all → must call agents
+            await tg_notify(f"DIE — {doc_id}\nValidation réutilisée depuis Supabase (0 appel agent).")
+        else:
+            # No prior validation → call agents via /validate/doc
             try:
                 async with httpx.AsyncClient(timeout=300) as c:
                     r = await c.post(f"{_BACKEND_URL}/validate/doc", json={"doc_id": doc_id})
@@ -234,39 +233,7 @@ class DocumentImprovementEngine:
                 "last_doc_sha": val_api.get("doc_sha"),
                 "last_commit_sha": val_api.get("commit_sha"),
                 "last_validation_id": f"VAL-{doc_id}-{val_api.get('thread_id','')}",
-                "iteration": iteration + 1,
             })
-        else:
-            # force_revalidate=True: post-improvement re-run → call agents
-            try:
-                async with httpx.AsyncClient(timeout=300) as c:
-                    r = await c.post(f"{_BACKEND_URL}/validate/doc", json={"doc_id": doc_id})
-                    r.raise_for_status()
-                    val_api = r.json()
-            except Exception as e:
-                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"revalidate: {str(e)[:200]}"})
-                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : revalidation impossible ({str(e)[:80]})")
-                return
-            api_status = val_api.get("status", "ERROR")
-            if api_status in ("MISSING_DOCUMENTS", "UPLOAD_FAILED", "UNKNOWN_DOC", "ERROR"):
-                self._update_run(run_id, {"status": "BLOCKED", "escalation_reason": f"revalidate {api_status}"})
-                await tg_notify(f"DIE — {doc_id}\nBLOQUÉ : revalidation {api_status}")
-                return
-            val_result = {
-                "status": api_status if api_status != "ALREADY_VALIDATED" else (last_val["status"] if last_val else "RESOLVED"),
-                "remarks": val_api.get("remarks") or (last_val.get("remarks") or [] if last_val else []),
-                "doc_sha": val_api.get("doc_sha"),
-                "commit_sha": val_api.get("commit_sha"),
-                "reused": api_status == "ALREADY_VALIDATED",
-            }
-            new_iter = iteration + 1
-            self._update_run(run_id, {
-                "last_doc_sha": val_api.get("doc_sha"),
-                "last_commit_sha": val_api.get("commit_sha"),
-                "last_validation_id": f"VAL-{doc_id}-{val_api.get('thread_id','')}",
-                "iteration": new_iter,
-            })
-            iteration = new_iter
 
         # ── REMARK_ANALYSIS ───────────────────────────────────────────────
         self._update_run(run_id, {"status": "REMARK_ANALYSIS"})
@@ -341,21 +308,22 @@ class DocumentImprovementEngine:
                 f"Répondez A ou Adopte pour confirmer."
             )
         else:
-            # ESCALATED from agents
-            self._update_run(run_id, {"work_packages_created": all_wp_ids})
-            if iteration + 1 >= MAX_ITERATIONS:
+            # Validation still ESCALATED — count this cycle against the limit
+            new_iter = iteration + 1
+            self._update_run(run_id, {"work_packages_created": all_wp_ids, "iteration": new_iter})
+            if new_iter >= MAX_ITERATIONS:
                 self._update_run(run_id, {
                     "status": "ESCALATED",
-                    "escalation_reason": f"{MAX_ITERATIONS} itérations — agents n'ont pas atteint consensus.",
+                    "escalation_reason": f"{MAX_ITERATIONS} cycles — validation non résolue. Intervention CEO requise.",
                 })
                 await tg_notify(
-                    f"DIE — {doc_id}\nESCALATED après {iteration + 1} itérations.\nIntervention CEO requise."
+                    f"DIE — {doc_id}\nESCALATED après {new_iter} cycles sans résolution.\nIntervention CEO requise."
                 )
             else:
                 self._update_run(run_id, {"status": "IMPLEMENTATION"})
                 await tg_notify(
-                    f"DIE — {doc_id}\nValidation {val_result['status']} — itération {iteration + 1}/{MAX_ITERATIONS}\n"
-                    f"WPs créés, en attente de correction GitHub."
+                    f"DIE — {doc_id}\nValidation {val_result['status']} — cycle {new_iter}/{MAX_ITERATIONS}\n"
+                    f"En attente de correction CEO sur GitHub."
                 )
 
     # ── Helpers ────────────────────────────────────────────────────────────
