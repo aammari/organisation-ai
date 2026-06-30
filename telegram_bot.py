@@ -204,13 +204,34 @@ async def _handle_validate_batch(update: Update):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _ceo_chat_id
-    message = update.message.text
+    message = update.message.text.strip()
     user = update.message.from_user.username or update.message.from_user.first_name
     chat_id = update.message.chat.id
     _ceo_chat_id = chat_id
     logger.info(f"Message reçu de {user} (chat_id={chat_id}): {message[:80]}")
 
-    # CEO replied to a thread opening message → intervention
+    # PRIORITÉ 1 — Réponse escalade CEO (avant tout autre routing)
+    if message.upper() in ("A", "B"):
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    f"{BACKEND_URL}/escalation/respond",
+                    json={"response": message.upper()},
+                )
+                r.raise_for_status()
+                data = r.json()
+            if data.get("handled"):
+                doc_id = data["doc_id"]
+                if message.upper() == "A":
+                    await update.message.reply_text(f"Correction {doc_id} v1.1 lancée. Les agents travaillent...")
+                else:
+                    await update.message.reply_text(f"Dérogation CEO enregistrée — {doc_id} validé en l'état.")
+                return
+            # handled=False → no pending escalation, fall through to normal routing
+        except Exception as e:
+            logger.error(f"escalation_respond: {e}")
+
+    # PRIORITÉ 2 — Intervention CEO dans un thread actif (reply_to)
     reply_to = update.message.reply_to_message
     if reply_to:
         reply_msg_id = reply_to.message_id
@@ -226,28 +247,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except Exception as e:
             logger.warning(f"intervene lookup: {e}")
-
-    # CEO responds A or B to an escalation
-    if message.strip().upper() in ("A", "B"):
-        try:
-            async with httpx.AsyncClient(timeout=300) as c:
-                r = await c.post(
-                    f"{BACKEND_URL}/escalation/respond",
-                    json={"response": message.strip().upper()},
-                )
-                r.raise_for_status()
-                data = r.json()
-            if data.get("handled"):
-                resp = data["response"]
-                doc_id = data["doc_id"]
-                if resp == "A":
-                    await update.message.reply_text(f"Correction {doc_id} v1.1 lancée. Les agents travaillent...")
-                else:
-                    await update.message.reply_text(f"Dérogation CEO enregistrée — {doc_id} validé en l'état.")
-                return
-            # No pending escalation — fall through to normal routing
-        except Exception as e:
-            logger.error(f"escalation_respond: {e}")
 
     # Validation pattern — "valide G-XX" or "valide tous les G"
     msg_lower = message.lower()
