@@ -147,6 +147,7 @@ class GoalPlanner:
                 "type": "DOCUMENT_CREATION",
                 "required_decision_level": "D2",
                 "estimated_effort": "MEDIUM",
+                "status": "PROPOSED",
                 "blocked_by": None,
             })
         # WP for compliance if gaps exist
